@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "patchtrack"
+dynamic = ["version"]
+description = "Track an author's patches on public-inbox mailing lists, like a pull request list"
+readme = "README.md"
+authors = [{ name = "Ryan Brue" }]
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+keywords = ["git", "patches", "mailing-list", "lore", "public-inbox", "b4", "kernel"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: POSIX",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Topic :: Communications :: Email",
+    "Topic :: Software Development :: Version Control :: Git",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ryanabx/patchtrack"
+Documentation = "https://ryanabx.github.io/patchtrack"
+Source = "https://github.com/ryanabx/patchtrack"
+Issues = "https://github.com/ryanabx/patchtrack/issues"
+Changelog = "https://github.com/ryanabx/patchtrack/blob/main/CHANGELOG.md"
+
+[project.scripts]
+patchtrack = "patchtrack.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "patchtrack.__version__" }
