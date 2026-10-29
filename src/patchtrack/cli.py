@@ -15,7 +15,7 @@ import subprocess
 import urllib.parse
 import webbrowser
 
-from . import __version__, b4local, board, config, local, lore, news, nudge, parse, pretty, series, store, thread, trees, vdiff
+from . import __version__, api, b4local, board, config, local, lore, news, nudge, parse, pretty, series, serve, store, thread, trees, vdiff
 
 
 def cmd_sync(args, db):
@@ -214,24 +214,11 @@ def cmd_people(args, db):
     approval), inline reviews, and applies. Bots are left out unless you
     pass ``--bots``.
     """
-    people = {}
-    for s in _load(args, db).values():
-        for r in s.replies:
-            if r.mine:
-                continue
-            p = people.setdefault(r.who.lower(), {"who": r.who, "bot": r.bot, "series": set(), "replies": 0,
-                                                  "tags": 0, "comments": 0, "applied": 0, "last": ""})
-            p["series"].add(s.family)
-            p["replies"] += 1
-            p["tags"] += any(k in series.APPROVALS for k, _ in r.trailers)
-            p["comments"] += series.is_review_comment(r)
-            p["applied"] += r.applied is not None
-            p["last"] = max(p["last"], r.date)
-    rows = sorted(people.values(), key=lambda p: p["last"], reverse=True)
+    rows = api.people(_load(args, db))
     if not args.bots:
         rows = [p for p in rows if not p["bot"]]
     if args.json:
-        json.dump([dict(p, series=sorted(p["series"])) for p in rows], sys.stdout, indent=2)
+        json.dump(rows, sys.stdout, indent=2)
         print()
         return 0
     print(f"{'last':<10}  {'series':>6} {'replies':>7} {'tags':>4} {'comments':>8} {'applied':>7}  who")
@@ -260,6 +247,68 @@ def cmd_board(args, db):
         with open(args.output, "w") as f:
             f.write(page)
         print(f"wrote {args.output}", file=sys.stderr)
+    return 0
+
+
+def _data(args, db):
+    found = _load(args, db)
+    return api.Data(found, series.families(found, db.closed()), {m["msgid"]: m for m in db.messages()},
+                    _authors(args, db), args.settings.lore or lore.DEFAULT_BASE, parse.now_utc())
+
+
+def cmd_export(args, db):
+    """Write the data for a web frontend: JSON files in a directory.
+
+    ``index.json`` lists every family, ``families/ID.json`` holds one with
+    its versions, conversations and version diffs, and ``people.json``
+    everyone who replied. :doc:`/api` describes them. A frontend is a
+    separate project that reads these files from any static web server,
+    or the same documents from ``serve``.
+
+    Each file is replaced whole, so a server never hands out half of one.
+    A family's file that is no longer exported is removed; nothing else in
+    the directory is touched. Run it from the same timer as ``sync`` (see
+    :doc:`/scheduling`).
+    """
+    data = _data(args, db)
+    os.makedirs(os.path.join(args.directory, "families"), exist_ok=True)
+    wanted = api.paths(data)
+    for path in wanted:
+        target = os.path.join(args.directory, path)
+        with open(target + ".tmp", "wb") as f:
+            f.write(serve.encode(api.document(data, path)))
+        os.replace(target + ".tmp", target)
+    fams = os.path.join(args.directory, "families")
+    for name in os.listdir(fams):
+        if api.FAMILY_PATH_RE.fullmatch(f"families/{name}") and f"families/{name}" not in wanted:
+            os.remove(os.path.join(fams, name))
+    print(f"wrote {len(wanted)} documents to {args.directory}", file=sys.stderr)
+    return 0
+
+
+def cmd_serve(args, db):
+    """Answer a web frontend with the same documents as ``export``, over HTTP.
+
+    Every request rebuilds its document from the store, so a ``sync`` in
+    another terminal shows on the next request. It is read-only: GET
+    only, and nothing in the store changes. :doc:`/api` describes the
+    documents; ``/`` is ``index.json``.
+
+    It listens on 127.0.0.1 unless ``--host`` says otherwise, and answers
+    only requests addressed to that host or to localhost. A browser lets
+    no other site read the answers unless ``--cors`` names that site's
+    origin, e.g. a frontend's development server.
+    """
+    _authors(args, db)  # fail now, not on the first request
+    server = serve.make_server(lambda: _data(args, db), args.host, args.port, args.cors)
+    host, port = server.server_address[:2]
+    print(f"serving http://{host}:{port}/ (Ctrl-C stops)", file=sys.stderr)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        server.server_close()
     return 0
 
 
@@ -741,7 +790,8 @@ def cmd_list(args, db):
                 continue
             rows.append((s, state, evidence))
     if args.json:
-        json.dump([dict(_as_dict(s), state=state, evidence=evidence) for s, state, evidence in rows],
+        json.dump([dict(api.series(s, args.settings.lore or lore.DEFAULT_BASE), state=state, evidence=evidence,
+                        evidence_msgids=api.evidence_msgids(evidence)) for s, state, evidence in rows],
                   sys.stdout, indent=2)
         print()
         return 0
@@ -790,22 +840,6 @@ def cmd_show(args, db):
             print(f"  {r.date[:16].replace('T', ' ')} on {r.index}/{s.total}: {who}")
         print()
     return 0
-
-
-def _as_dict(s):
-    return {
-        "root": s.root, "author": s.author, "title": s.title, "version": s.version,
-        "total": s.total, "date": s.date, "family": s.family, "state": s.state,
-        "evidence": s.evidence, "unanswered": s.unanswered,
-        "applied": sorted(s.applied), "superseded_by": s.superseded_by, "as_of": s.as_of,
-        "lists": sorted(s.lists),
-        "tags": [{"patch": i, "kind": k, "who": w, "msgid": m} for i, k, w, m in s.tags],
-        "patches": {str(i): m for i, m in sorted(s.patches.items())},
-        "stages": {str(i): series.STAGES[v] for i, v in sorted(s.stages.items())},
-        "trees": {str(i): [{k: r.get(k) for k in ("tree", "role", "ref_sha", "commit_sha", "how", "reverted_by",
-                                                  "checked_at")}
-                           for r in rows] for i, rows in sorted(s.tree_rows.items())},
-    }
 
 
 DOCS_URL = "https://ryanabx.github.io/patchtrack"
@@ -988,6 +1022,21 @@ def build_parser():
     sp.add_argument("--title")
     sp.add_argument("--lore", help="archive the cards link to (default: [sync] lore, or lore.kernel.org)")
     sp.set_defaults(func=cmd_board)
+
+    sp = command("export", cmd_export, "write JSON for a web frontend: every family, its threads and diffs")
+    sp.add_argument("directory", help="written into; created if missing")
+    sp.add_argument("-a", "--author", action="append", help="default: [sync] authors, or every author synced")
+    sp.add_argument("-l", "--list", help="only series found by a sync of this inbox")
+    sp.set_defaults(func=cmd_export)
+
+    sp = command("serve", cmd_serve, "serve the same JSON over HTTP, read-only, for a web frontend")
+    sp.add_argument("-a", "--author", action="append", help="default: [sync] authors, or every author synced")
+    sp.add_argument("-l", "--list", help="only series found by a sync of this inbox")
+    sp.add_argument("--host", default="127.0.0.1", help="address to listen on (default 127.0.0.1: this machine only)")
+    sp.add_argument("--port", type=int, default=8080, help="default 8080; 0 picks a free one")
+    sp.add_argument("--cors", metavar="ORIGIN", help="let pages from this origin read the answers, "
+                    "e.g. http://localhost:5173")
+    sp.set_defaults(func=cmd_serve)
 
     return p
 

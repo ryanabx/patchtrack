@@ -71,21 +71,26 @@ def cover_part(body):
     return "\n".join(out).rstrip()
 
 
-def patch_part(body, diffs):
-    """A patch's message, and its diff or a one-line summary of it."""
+def split_patch(body):
+    """(message, the rest from the --- line or the first diff on) of a posted patch, as lines."""
     lines = body.splitlines()
     cut = next((k for k, ln in enumerate(lines) if DIFF_START_RE.match(ln)), len(lines))
-    head = "\n".join(lines[:cut]).rstrip()
-    rest = lines[cut:]
+    return lines[:cut], lines[cut:]
+
+
+def patch_part(body, diffs):
+    """A patch's message, and its diff or a one-line summary of it."""
+    message, rest = split_patch(body)
+    head = "\n".join(message).rstrip()
     if diffs or not rest:
-        return "\n".join(lines).rstrip(), None
+        return "\n".join(message + rest).rstrip(), None
     files = sum(1 for ln in rest if ln.startswith("diff --git "))
     changed = sum(1 for ln in rest if ln[:1] in "+-" and not ln.startswith(("+++", "---")))
     return head, f"[diff: {files} file{'s' if files != 1 else ''}, {changed} lines changed; --diffs to show]"
 
 
-def render(s, messages, color=False, diffs=False, width=100):
-    """Lines for the conversation of series s, given its stored message dicts by id."""
+def order(s, messages):
+    """(message, depth) for the conversation of series s, in reply order."""
     ids = {s.root} | set(s.patches.values()) | {r.msgid for r in s.replies}
     mail = [messages[m] for m in ids if m in messages]
     depth = {}
@@ -106,16 +111,21 @@ def render(s, messages, color=False, diffs=False, width=100):
     for m in sorted(mail, key=lambda m: (m["date"], index.get(m["msgid"], 1 << 30), m["msgid"])):
         parent = m["in_reply_to"] if m["in_reply_to"] in ids else None
         children.setdefault(parent, []).append(m)
-    order, stack = [], list(reversed(children.get(None, [])))
+    out, stack = [], list(reversed(children.get(None, [])))
     while stack:
         m = stack.pop()
-        order.append(m)
+        out.append(m)
         stack += reversed(children.get(m["msgid"], []))
+    return [(m, level(m)) for m in out]
 
+
+def render(s, messages, color=False, diffs=False, width=100):
+    """Lines for the conversation of series s, given its stored message dicts by id."""
+    index = {mid: i for i, mid in s.patches.items()}
     replies = {r.msgid: r for r in s.replies}
     out = []
-    for m in order:
-        pad = INDENT * min(level(m), MAX_DEPTH)
+    for m, depth in order(s, messages):
+        pad = INDENT * min(depth, MAX_DEPTH)
         r = replies.get(m["msgid"])
         who = f'{m["from_name"] or m["from_addr"]}'
         if m["msgid"] in index:

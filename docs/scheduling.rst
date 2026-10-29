@@ -40,3 +40,8 @@ Then:
 If ``patchtrack`` is not on the user manager's ``PATH`` (see
 ``systemctl --user show-environment``), write its full path, e.g.
 ``%h/.local/bin/patchtrack`` after ``pip install --user``.
+
+For a web frontend that reads static files, add ``export`` to the same
+line, e.g. ``; patchtrack export %h/public_html/patchtrack``. A frontend
+that talks to ``serve`` needs no timer for the data: each request reads
+the store as the last sync left it.

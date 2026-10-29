@@ -1,13 +1,8 @@
 """A static HTML board: one card per family, in a column per stage."""
 
 import html
-import re
-import urllib.parse
 
-from . import __version__, lore
-
-# The message-id that closes an evidence clause: "... <id>" or "... <id>; ..."
-EVIDENCE_MSGID_RE = re.compile(r" <([^<>\s]+)>(?=;|$)")
+from . import __version__, api, lore
 
 COLUMNS = (
     ("Waiting", ("unfetched", "no-reply", "bot-only")),
@@ -43,7 +38,7 @@ header p { margin: 0 0 1.25rem; color: var(--muted); }
 
 
 def _url(base, msgid):
-    return html.escape(f"{base}/all/{urllib.parse.quote(msgid, safe='@+-._~=')}/")
+    return html.escape(lore.message_url(base, msgid))
 
 
 def _card(fam, base):
@@ -60,7 +55,7 @@ def _card(fam, base):
 
 def _evidence(text, base):
     out, last = [], 0
-    for m in EVIDENCE_MSGID_RE.finditer(text):
+    for m in api.EVIDENCE_MSGID_RE.finditer(text):
         out.append(html.escape(text[last:m.start()]))
         out.append(f' <a class="mail" href="{_url(base, m.group(1))}">mail</a>')
         last = m.end()

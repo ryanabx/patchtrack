@@ -53,6 +53,7 @@ would.
    concepts
    commands/index
    configuration
+   api
    projects
    scheduling
    about

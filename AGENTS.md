@@ -24,6 +24,8 @@ language, same archive, same conventions where we can match them.
 | `src/patchtrack/series.py` | messages to series, families and states |
 | `src/patchtrack/cli.py` | `patchtrack sync`, `list`, `show`, `people`, `board`, `tree`, `check` |
 | `src/patchtrack/board.py` | the static HTML board |
+| `src/patchtrack/api.py` | the JSON documents a web frontend reads; its docstring is the contract (`docs/api.rst`) |
+| `src/patchtrack/serve.py` | `serve`: those documents over HTTP, GET only, Host-checked, no CORS unless asked |
 | `src/patchtrack/pretty.py` | terminal output for `list`: circles, colours, aligned columns |
 | `docs/` | the Sphinx site: `conf.py` (generates the command pages), hand-written pages, `requirements.txt` |
 | `src/patchtrack/config.py` | the TOML config file; bot rules |
@@ -38,6 +40,7 @@ language, same archive, same conventions where we can match them.
 | `tests/test_news.py` | `news`: first look, changes, `--peek`, `--since` |
 | `tests/test_local.py` | local sources, incremental reads, `sync --offline`, local mail driving archive fetches |
 | `tests/test_lore.py` | retries and backoff against a fake opener; windowed search |
+| `tests/test_api.py` | `export`, `serve` and the documents: reply order, diffs, Host check, stale files |
 | `tests/test_pretty.py`, `tests/test_config.py` | `list` output; the config file and bot rules |
 
 ## Documentation
@@ -58,6 +61,9 @@ from `main`.
   (`docs/configuration.rst` is an `automodule`).
 - **Hand-written pages** (`docs/*.rst`) are for what no single command
   owns: concepts, quick start, other projects, scheduling, about.
+- **The web frontend's contract is `api.py`'s module docstring**
+  (`docs/api.rst` is an `automodule`). Change the docstring with the
+  documents.
 - **Help strings must not depend on the machine**: they end up on the
   website, so show `$XDG_DATA_HOME/...`, not a resolved path.
 - **Build strictly before committing**: `sphinx-build -W --keep-going -n
@@ -93,6 +99,28 @@ from `main`.
   reference links (the first live run matched one patch to a later
   commit that merely cited it). `git log -p` over a path filter needs
   `--full-diff`, or a larger commit is trimmed into a false patch-id match.
+
+## Web frontend
+
+The frontend is a separate project, never this package. `api.py` turns
+what the commands already derive into JSON documents; `export` writes
+them as files and `serve` answers with them, at the same relative paths,
+so a frontend's only setting is a base URL. `api.py` knows nothing of
+HTTP or HTML, and `serve.py` nothing of series. `list --json` and
+`people --json` use the same serializers, so there is one shape for a
+series.
+
+- **Derive, don't render.** A document carries facts and the derivations
+  patchtrack owns (states, evidence, reply order, version pairs); how to
+  show them (quote collapsing, colours, columns) is the frontend's.
+- **`schema` goes up only when a field is removed or changes meaning.**
+  Adding one is free; frontends ignore what they do not know.
+- **Read-only for now.** `close`/`reopen` and `news`' `seen` are the only
+  user decisions the store keeps; a write endpoint, when one is wanted,
+  calls the same `Store` methods, and still never sends mail (drafts only).
+- **The documents are people's mail.** `serve` binds 127.0.0.1, refuses a
+  Host header it does not expect (DNS rebinding), and sends CORS only for
+  the one origin `--cors` names.
 
 ## Sync robustness and identity
 
@@ -284,6 +312,8 @@ TUI. What is left, roughly in order of value:
    branches as trees). Mailman and PostgreSQL archives are not
    public-inbox. DPDK's search is behind a bot check.
 5. **Board**: per list works (`-l`); `--all-versions` does not exist yet.
+   The web frontend's data is `export`/`serve`; `news` and `nudge` are
+   not documents yet, and there is no write endpoint.
    The docs have a systemd timer for `sync && check --fetch; board`
    (`docs/scheduling.rst`).
 6. **Old rows** stored before a migration lack its columns until they are

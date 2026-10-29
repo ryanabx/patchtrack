@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- **Data for a web frontend**: `export DIR` writes JSON documents (every
+  family; each family's versions, conversations and version diffs; people),
+  and `serve` answers with the same documents over HTTP, read-only, on
+  localhost. The frontend is a separate project; the documents are
+  described at https://ryanabx.github.io/patchtrack/api.html.
+- `list --json` gains fields (`label`, `titles`, `url`, `to`,
+  `evidence_msgids`, …); none is removed.
+
 ## 0.1.0
 
 The first version.

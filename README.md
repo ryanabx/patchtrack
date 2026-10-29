@@ -26,7 +26,8 @@ It also shows what changed since you last looked (`news`), which series
 need a reply, a ping or a RESEND (`nudge`), what changed between versions
 (`diff`), where your b4 branches stand (`branches`), and whether each
 patch is in a git tree (`check`). It reads the archive, your own mailbox,
-or both.
+or both. For a web frontend, `export` writes the same data as JSON files
+and `serve` answers with it over HTTP.
 
 **Documentation: https://ryanabx.github.io/patchtrack**
 

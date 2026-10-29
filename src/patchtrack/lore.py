@@ -25,6 +25,11 @@ RETRY_STATUS = {429, 500, 502, 503, 504}
 SPLIT_AT = 1000
 
 
+def message_url(base, msgid):
+    """A message's page on the archive."""
+    return f"{base}/all/{urllib.parse.quote(msgid, safe='@+-._~=')}/"
+
+
 class LoreError(RuntimeError):
     pass
 
