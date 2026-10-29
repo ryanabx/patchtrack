@@ -1,0 +1,101 @@
+// The shapes the bridge answers with that are not the core's model (those
+// are generated, in core/).
+
+import type { State } from "./core/State";
+
+/** A setting: what the core says of it, and its stored JSON (null: the default). */
+export type Setting = {
+  key: string;
+  shape: string;
+  /** The control it takes: addresses, text, url, time, days, minutes, bool, projects, profiles, bots. */
+  input: "addresses" | "text" | "url" | "time" | "days" | "minutes" | "bool" | "projects" | "profiles" | "bots";
+  default: string;
+  doc: string;
+  value: string | null;
+};
+
+/** An open family that needs something of you. */
+export type Nudge = { sender: string; key: string; title: string; state: State; kind: string; days: number; why: string };
+
+/** A family that changed since you last read it, and how. */
+export type Notification = {
+  sender: string;
+  key: string;
+  title: string;
+  state: State;
+  /** The latest version, its lists, and its last activity. */
+  version: number;
+  lists: string[];
+  updated: string;
+  newSeries: boolean;
+  newVersion: number | null;
+  stateChange: [State, State] | null;
+  /** A line for each new reply. */
+  replies: string[];
+};
+/** `first` before anything was ever read: no baseline to compare with yet. */
+export type Notifications = { first: boolean; notifications: Notification[] };
+
+/** Whose series a view shows: "followed" is the authors you follow and your identities. */
+export type Who = "everyone" | "followed" | "mine";
+
+/**
+ * The families (by `familyId`) of "mine" and "followed"; and the addresses
+ * of the authors you follow and your identities, whose mail "only what you
+ * follow" keeps.
+ */
+export type Scope = { mine: string[]; followed: string[]; authors: string[] };
+
+/** What adding mail did: messages read, kept (all, unless only followed), and new; `store` for a store file merged. */
+export type Added = { read: number; kept: number; new: number; store: boolean };
+
+/** Mail you composed, kept until you remove it. */
+export type Draft = {
+  msgid: string;
+  /** The family it is about (sender NUL key), or "". */
+  family: string;
+  kind: "reply" | "tag" | "review" | "thanks" | "ping";
+  created_at: string;
+  sent_at: string | null;
+  subject: string | null;
+  to: string[] | null;
+  cc: string[] | null;
+  in_reply_to: string | null;
+  body: string | null;
+  /** The message as it will be sent. */
+  raw: string;
+};
+
+/** A comment on a line of a patch: its message-id, which line of its diff (from 0), and what to say. */
+export type ReviewComment = { msgid: string; at: number; text: string };
+
+/** Kinds of subscription: an author, every series on a list, a search, one thread. */
+export type Kind = "author" | "list" | "query" | "thread";
+
+/** What this store follows. */
+export type Subscription = { kind: Kind; value: string; list: string; archive: string; label: string };
+
+/** A project: an archive, its lists there (none: every one), and recipients that place your own mail in it. */
+export type Project = { name: string; archive: string; lists: string[]; recipients: string[] };
+
+/** Your projects, the built-in ones, and the archive setting's archive. */
+export type Projects = { projects: Project[]; presets: Project[]; archive: string };
+
+/** Local mail the bridge reads on each sync (`patchtrack source add`). */
+export type Source = { path: string; read_at: string | null };
+
+/** The bridge's own syncs: one running, or when the last finished and how. */
+export type SyncStatus = {
+  running: boolean;
+  /** A sync is wanted as soon as the one running is done. */
+  asked: boolean;
+  started: string | null;
+  finished: string | null;
+  /** Whether the last sync finished with nothing failed. */
+  ok: boolean | null;
+  /** What the current or last sync said. */
+  log: string[];
+};
+
+/** The store's generation (it changes whenever the store does), and the syncs. */
+export type Status = { generation: number; messages: number; sync: SyncStatus; unread: number };

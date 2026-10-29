@@ -1,0 +1,36 @@
+name: web
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain rust-toolchain.toml pins
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - name: The model's TypeScript types are up to date
+        run: |
+          cargo test -q -p patchtrack-core --features ts export_bindings
+          # A new type is a new, untracked file, which `git diff` would not show.
+          git status --porcelain web/src/core | grep . && { git diff web/src/core; exit 1; } || true
+      - run: npm ci
+        working-directory: web
+      - name: Type-check and build
+        run: npm run build
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      # The bridge sends drafts through git send-email, packaged apart from
+      # git; without it, the suite checks that the bridge says so instead.
+      - name: git send-email, for sending through the bridge
+        continue-on-error: true
+        run: sudo apt-get update -q && sudo apt-get install -y -q git-email
+      - name: In a real browser (headless Firefox, synthetic mail, the bridge)
+        run: |
+          cargo build -p patchtrack
+          python3 web/e2e/run.py
