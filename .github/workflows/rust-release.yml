@@ -1,0 +1,106 @@
+name: rust-release
+
+# Builds the release artifacts and attaches them to the GitHub release:
+# the patchtrack binary for Linux x86_64 (static, musl) and Windows x86_64,
+# the web app (web/dist) as a zip, and SHA-256 checksums of all three.
+# Runs when a release is published, and refuses a tag that does not match
+# the workspace version. Publishing the release is the owner's step.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The release tag matches the workspace version
+        run: |
+          version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"$/\1/p}' Cargo.toml)
+          test "${GITHUB_REF_NAME#v}" = "$version" || { echo "tag $GITHUB_REF_NAME, version $version"; exit 1; }
+      - name: The toolchain rust-toolchain.toml pins
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - name: Tests
+        run: cargo test --workspace
+
+  linux:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain, with the musl target, and musl's C compiler (SQLite and ring are C)
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target x86_64-unknown-linux-musl
+          sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked -p patchtrack --target x86_64-unknown-linux-musl
+      - name: Archive
+        run: |
+          name=patchtrack-${GITHUB_REF_NAME}-x86_64-linux
+          mkdir "$name" && cp target/x86_64-unknown-linux-musl/release/patchtrack README.md LICENSE "$name"/
+          tar -czf "$name.tar.gz" "$name"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: linux
+          path: patchtrack-*.tar.gz
+
+  windows:
+    needs: check
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain rust-toolchain.toml pins
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - run: cargo build --release --locked -p patchtrack
+      - name: Archive
+        shell: pwsh
+        run: |
+          $name = "patchtrack-$env:GITHUB_REF_NAME-x86_64-windows"
+          New-Item -ItemType Directory $name | Out-Null
+          Copy-Item target/release/patchtrack.exe, README.md, LICENSE $name
+          Compress-Archive -Path $name -DestinationPath "$name.zip"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: windows
+          path: patchtrack-*.zip
+
+  web:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: npm ci && npm run build
+        working-directory: web
+      - name: Archive
+        run: |
+          name=patchtrack-${GITHUB_REF_NAME}-web
+          cp -r web/dist "$name" && zip -qr "$name.zip" "$name"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: web
+          path: patchtrack-*-web.zip
+
+  attach:
+    needs: [linux, windows, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v6
+        with:
+          merge-multiple: true
+      - name: Checksums
+        run: sha256sum patchtrack-* > SHA256SUMS && cat SHA256SUMS
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" patchtrack-* SHA256SUMS --repo "$GITHUB_REPOSITORY"

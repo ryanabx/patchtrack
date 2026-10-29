@@ -1,0 +1,14 @@
+[book]
+title = "patchtrack"
+description = "A pull-request list for patches sent by email"
+language = "en"
+src = "src"
+
+[build]
+build-dir = "build"
+# Every page is either written or generated; a missing one is an error.
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/ryanabx/patchtrack"
+site-url = "/patchtrack/book/"

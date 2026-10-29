@@ -1,6 +1,9 @@
 __pycache__/
-*.egg-info/
-/build/
-/dist/
 *.sqlite3
 /target/
+
+# The book: generated pages (see book/README.md) and the built site
+/book/build/
+/book/src/SUMMARY.md
+/book/src/settings.md
+/book/src/commands/

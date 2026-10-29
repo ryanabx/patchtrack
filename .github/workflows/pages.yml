@@ -1,0 +1,53 @@
+name: pages
+
+# The site: the web app at the root, the book under book/. Deployed from
+# main only.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain rust-toolchain.toml pins, for the book's pages
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - name: The web app
+        run: npm ci && npm run build
+        working-directory: web
+      - name: The book
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          cargo run -q -p patchtrack -- book-pages book
+          "$HOME/.local/bin/mdbook" build book
+      - name: One site
+        run: cp -r web/dist site && cp -r book/build site/book
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

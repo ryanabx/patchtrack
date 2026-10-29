@@ -1,0 +1,27 @@
+name: book
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  book:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain rust-toolchain.toml pins
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal
+      - name: mdBook
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          curl -sSfL https://github.com/rust-lang/mdBook/releases/download/v0.5.4/mdbook-v0.5.4-x86_64-unknown-linux-gnu.tar.gz \
+            | tar -xz -C "$HOME/.local/bin"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: The pages generated from the code (commands, settings)
+        run: cargo run -q -p patchtrack -- book-pages book
+      - name: Build, failing on any warning
+        run: |
+          mdbook build book 2>&1 | tee build.log
+          ! grep -E "WARN|ERROR" build.log

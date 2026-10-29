@@ -4,71 +4,58 @@ The goal is a GitHub-like workflow for patches sent by email: first "my
 pull requests" (an author's series and where each stands), then the views
 and actions that make that useful. The archive is any public-inbox
 instance, lore.kernel.org first. The neighbours are `b4` and `lei`: same
-language, same archive, same conventions where we can match them.
+archive, same conventions where we can match them.
+
+patchtrack is written in Rust: one core with no I/O, run by the
+`patchtrack` binary (Linux and Windows), whose bridge serves the store to
+a web app. `ARCHITECTURE.md` explains the design and records what was
+measured; read it first. It replaced a Python version, which was the
+reference: its behaviour, not its code, was ported, and its calibration
+notes below still hold. The tag `python-last` is the last commit with
+both, for parity checks.
 
 ## Layout
 
 | path | what |
 |---|---|
-| `src/patchtrack/lore.py` | the only network code: public-inbox search export (`?x=m`) and thread `t.mbox.gz` |
-| `src/patchtrack/parse.py` | mail to facts: subject prefixes, trailers, "applied" evidence, b4 change-ids |
-| `src/patchtrack/thread.py` | `read`: reply order, depth, quote collapsing, patch and cover parts |
-| `src/patchtrack/tui.py` | the curses browser: `Model` (keys, views; no curses) and a thin `draw`/`run` |
-| `src/patchtrack/b4local.py` | `branches`: b4 prep tracking commits, patch-id comparison with the last version sent |
-| `src/patchtrack/vdiff.py` | `diff`: pairing patches across versions, normalised diff of diffs, cover changelogs |
-| `src/patchtrack/nudge.py` | which open series need a reply, ping or RESEND; drafted pings |
-| `src/patchtrack/news.py` | what changed since you last looked: snapshots and their differences |
-| `src/patchtrack/local.py` | your own mail: Maildir, `.eml` directories, mbox; header-first filtering |
-| `src/patchtrack/trees.py` | git: fetch a tree, find posted patches in it (message-id trailer, patch-id, subject) |
-| `src/patchtrack/store.py` | SQLite of raw facts: messages, fetch times, trees and per-patch tree results |
-| `src/patchtrack/series.py` | messages to series, families and states |
-| `src/patchtrack/cli.py` | `patchtrack sync`, `list`, `show`, `people`, `board`, `tree`, `check` |
-| `src/patchtrack/board.py` | the static HTML board |
-| `src/patchtrack/api.py` | the JSON documents a web frontend reads; its docstring is the contract (`docs/api.rst`) |
-| `src/patchtrack/serve.py` | `serve`: those documents over HTTP, GET only, Host-checked, no CORS unless asked |
-| `src/patchtrack/pretty.py` | terminal output for `list`: circles, colours, aligned columns |
-| `docs/` | the Sphinx site: `conf.py` (generates the command pages), hand-written pages, `requirements.txt` |
-| `src/patchtrack/config.py` | the TOML config file; bot rules |
-| `tests/test_patchtrack.py` | unittest, synthetic mail only, no network |
-| `tests/test_trees.py` | matchers against a throwaway git repo; stage derivation |
-| `tests/test_sync.py` | what `sync` refetches and how it fails, against an in-memory fake archive |
-| `tests/test_thread.py` | quote collapsing, sign-offs, patch and cover parts, reply order |
-| `tests/test_tui.py` | the TUI model and layout on a fake window; a real run in a pty |
-| `tests/test_b4local.py` | branches as sent, changed and never sent, in a throwaway repo |
-| `tests/test_vdiff.py` | rebase-only is unchanged; added, dropped, retitled; changelogs |
-| `tests/test_nudge.py` | nudge kinds at fixed dates, drafts, close/reopen |
-| `tests/test_news.py` | `news`: first look, changes, `--peek`, `--since` |
-| `tests/test_local.py` | local sources, incremental reads, `sync --offline`, local mail driving archive fetches |
-| `tests/test_lore.py` | retries and backoff against a fake opener; windowed search |
-| `tests/test_api.py` | `export`, `serve` and the documents: reply order, diffs, Host check, stale files |
-| `tests/test_pretty.py`, `tests/test_config.py` | `list` output; the config file and bot rules |
+| `crates/core/src/mail.rs` | `Message::parse` (raw bytes to fields), `Head` (headers only), `PARSER_VERSION` |
+| `crates/core/src/subject.rs`, `evidence.rs` | subject prefixes; trailers, "applied" lines, inline comments |
+| `crates/core/src/series.rs` | messages to series, families and states, with evidence |
+| `crates/core/src/rules.rs`, `settings.rs` | bots and project profiles; the settings (keys, defaults, validation) and subscriptions |
+| `crates/core/src/sync.rs` | sync as a state machine: plans every request and wait, emits effects |
+| `crates/core/src/local.rs` | which local mail to keep; which threads it shows |
+| `crates/core/src/thread.rs`, `vdiff.rs`, `difflib.rs` | reply order; patches across versions; Python's difflib, ported |
+| `crates/core/src/news.rs`, `nudge.rs`, `compose.rs` | what changed; who needs a nudge; plain-text drafts |
+| `crates/core/src/trees.rs`, `b4.rs` | which commit is which posting; b4 prep branches |
+| `crates/core/src/views.rs` | people, picking series by a query, archive URLs |
+| `crates/store/src/lib.rs` | the SQLite schema and migrations |
+| `crates/cli/src/main.rs` | the commands (clap); sync's HTTP loop; settings, follow, source, import, export |
+| `crates/cli/src/views.rs`, `pretty.rs`, `read.rs` | list, show, people, close, open, news, nudge, read, diff; terminal output |
+| `crates/cli/src/git.rs`, `tree.rs`, `local.rs` | git as a subprocess; `tree`, `check`, `branches`; reading local mail |
+| `crates/cli/src/tui.rs`, `book.rs` | the TUI (a `Model` and a thin ratatui layer); the book's generated pages |
+| `crates/cli/src/bridge.rs`, `api.rs`, `machine.rs` | `bridge` and `serve`: who may ask (host, origin, token); what the web app asks of the store, and the bridge's own syncs; b4 for the app |
+| `web/` | the web app: Preact and TypeScript over the bridge's API; `web/src/core/` is generated by ts-rs |
+| `book/` | the documentation (mdBook) |
+| `crates/*/tests/`, `tests/fixtures/` | integration tests; synthetic fixtures |
 
 ## Documentation
 
-The site is https://ryanabx.github.io/patchtrack, built with Sphinx (as
-b4's is) by `.github/workflows/docs.yml` and published to GitHub Pages
-from `main`.
+The site is https://ryanabx.github.io/patchtrack. The book is in `book/`
+(mdBook); `book/README.md` says how to build it.
 
-- **A command's documentation is its docstring.** Each `cmd_*` function
-  in `cli.py` has a reStructuredText docstring. `build_parser()` passes
-  it to argparse as the subcommand's description, so `patchtrack CMD
-  --help` and the website show the same text: `--help` through `_Help`,
-  which strips the markup and turns `:doc:` references into URLs, and
-  the website through `sphinx-argparse`. `docs/conf.py` writes one page
-  per subcommand at build time (`docs/commands/`, ignored by git), so a
-  new command gets its page without anyone adding one.
-- **The configuration reference is `config.py`'s module docstring**
-  (`docs/configuration.rst` is an `automodule`).
-- **Hand-written pages** (`docs/*.rst`) are for what no single command
+- **A command's documentation is its help text.** `patchtrack book-pages
+  book` (a hidden command) writes one page per command from clap, the
+  settings reference from `settings::KEYS`, and `SUMMARY.md` from
+  `book/SUMMARY.template.md`, so a new command gets its page without
+  anyone adding one. The generated files are not in git.
+- **Hand-written pages** (`book/src/*.md`) are for what no single command
   owns: concepts, quick start, other projects, scheduling, about.
-- **The web frontend's contract is `api.py`'s module docstring**
-  (`docs/api.rst` is an `automodule`). Change the docstring with the
-  documents.
 - **Help strings must not depend on the machine**: they end up on the
-  website, so show `$XDG_DATA_HOME/...`, not a resolved path.
-- **Build strictly before committing**: `sphinx-build -W --keep-going -n
-  -b html docs docs/_build/html` (`pip install -r docs/requirements.txt`).
-  The tests check that every command has a one-line help and a docstring.
+  website, so name `$XDG_DATA_HOME/...` or `%LOCALAPPDATA%`, not a
+  resolved path.
+- **Build it before committing a change to help or pages**: CI fails on
+  any mdBook warning. The tests check that every command has a one-line
+  help and a description.
 
 ## Design rules
 
@@ -76,7 +63,9 @@ from `main`.
   messages, when each thread was fetched, and the latest result of each
   (patch, tree) check, including "not found", with the ref sha. Series, families and states
   are recomputed on every read, so a better heuristic applies to old data
-  without a refetch. Do not cache derived state.
+  without a refetch. Do not store derived state. (The bridge keeps what
+  it derived in memory until `PRAGMA data_version` says the store
+  changed; that is the only cache.)
 - **Every state carries its evidence.** That is the message-id and the
   line that justifies it, plus the time the thread was last fetched. A
   state the tool cannot point at a message for (`unfetched`) is labelled
@@ -84,14 +73,30 @@ from `main`.
 - **Say only what the mail says.** `unanswered` means "someone wrote after
   the author", not "the author owes a reply". Prefer a factual label to a
   judgement the tool cannot make.
-- **Be polite to the archive.** Read-only, one search per author, one
+- **Be polite to the archive.** Read-only, one search per subscription, one
   request per thread, `--delay` between requests, an honest
   `User-Agent`. Never work around a bot check (lore runs Anubis); if one
   blocks us, report it.
-- **Never send mail.** Any future action that would (replies, `b4 ty`
-  style thanks) prepares the message and stops; a person sends it.
-- **Standard library only** until a dependency clearly earns its place;
-  git is called as a subprocess.
+- **No I/O in the core.** `patchtrack-core` parses bytes and derives;
+  the binary fetches, reads files, runs git and keeps the store. Time comes in as arguments. Every request goes through
+  `sync::Sync`, so the politeness rules are written once.
+- **A person sends mail.** Drafts are composed in the core (plain text,
+  7bit or 8bit, never quoted-printable) and kept in the store; nothing is
+  sent without the whole message shown and an explicit action (`send`
+  asks for "yes"). Natively mail goes through `git send-email`, with the
+  user's sendemail.* configuration and no password of ours; recipients
+  come from the draft alone. The web app hands a draft over as a file,
+  the clipboard or a mailto: link, or has the bridge or `serve` send it
+  (`--allow-send`: a stored draft, by its message-id, only From an
+  identity of that machine's store). The bridge can be reached from anywhere behind an HTTPS tunnel
+  (`--public-url`); the app pairs with a bridge elsewhere only once the
+  person confirms it. `git send-email` exits 0 having sent nothing when it cannot
+  read an address: `deliver` requires its "Result: OK" (or 2xx) line.
+  b4 is driven, not replaced: the bridge runs `b4 send`, `--resend` and
+  `trailers -u` (dry run first) in a worktree of the branch; see
+  ARCHITECTURE.md ("What goes through b4").
+- **Few dependencies**, each earning its place; none that brings an async
+  runtime or does I/O behind the core's back. git is a subprocess.
 - **Never make a history shallow.** Fetches take whole branches into
   `refs/patchtrack/<name>`. On a shallow history, "not found" means nothing.
 - **Match only on what names the patch.** A message-id counts only in a
@@ -100,27 +105,20 @@ from `main`.
   commit that merely cited it). `git log -p` over a path filter needs
   `--full-diff`, or a larger commit is trimmed into a false patch-id match.
 
-## Web frontend
+## The web app
 
-The frontend is a separate project, never this package. `api.py` turns
-what the commands already derive into JSON documents; `export` writes
-them as files and `serve` answers with them, at the same relative paths,
-so a frontend's only setting is a base URL. `api.py` knows nothing of
-HTTP or HTML, and `serve.py` nothing of series. `list --json` and
-`people --json` use the same serializers, so there is one shape for a
-series.
-
-- **Derive, don't render.** A document carries facts and the derivations
-  patchtrack owns (states, evidence, reply order, version pairs); how to
-  show them (quote collapsing, colours, columns) is the frontend's.
-- **`schema` goes up only when a field is removed or changes meaning.**
-  Adding one is free; frontends ignore what they do not know.
-- **Read-only for now.** `close`/`reopen` and `news`' `seen` are the only
-  user decisions the store keeps; a write endpoint, when one is wanted,
-  calls the same `Store` methods, and still never sends mail (drafts only).
-- **The documents are people's mail.** `serve` binds 127.0.0.1, refuses a
-  Host header it does not expect (DNS rebinding), and sends CORS only for
-  the one origin `--cors` names.
+`web/` is a client of `patchtrack bridge` (or `serve`), and keeps nothing
+but the bridge's address and token (decided 2026-10-29: the app was not
+much use without a way to sync, and importing files into a browser was
+clumsy). The bridge reads, derives and changes the store on its machine
+(`api.rs`: `GET`s to read, `POST`s of JSON to change), syncs it on its
+own (when it starts, every `sync_every` minutes, after a follow, and when
+asked), sends mail and runs b4. The app polls `/v1/status` and reads
+again when the store's generation changes, so a sync or a command in a
+terminal shows up without a reload. Its types are generated from the
+Rust (ts-rs, `npm run types`); CI fails if they differ. It cannot fetch
+lore (no CORS, and we do not ask): the bridge does. The Python version's
+JSON API (`export DIR`, `serve`) and `board` are not ported.
 
 ## Sync robustness and identity
 
@@ -149,6 +147,18 @@ keeps. `news --since` rebuilds only the mail as of a time. A first
 version also rebuilt tree checks and fetches as of then, and on a store
 created after that time it reported every tree result as fresh news
 ("rtc: applied → in-next" for a patch in next long before).
+
+The web app's Notifications are the same comparison, read one family at
+a time: "Mark as read" and opening a series' conversation store that
+family's snapshot (`/v1/notifications/read`); `news` in a terminal marks
+everything. Reading what is read already must write nothing: any commit
+is a change the app reloads for. The first read marks every family, or
+everything else would turn up as a new series.
+
+**Opening the store must not write.** It used to set `application_id`
+on every open, which bumped `PRAGMA data_version` on every request; the
+app, polling, saw a change every few seconds and redrew the page. A
+store test and an API test guard it.
 
 ## Nudges and closing
 
@@ -186,53 +196,100 @@ this series applied I see a bunch of qom-test failures".
 
 ## Sync
 
-The first sync of an (author, list) covers the window; later ones are
-incremental (see the ``sync`` docstring). "As of" stays the time a *whole thread* was last
+The first sync of a subscription covers the window (an author's from
+`since`, a list's or a query's from the shorter `list_since`); later ones
+are incremental (see `patchtrack sync --help`). Sync records are kept per
+subscription (kind, value, inbox), and `found_by` records which list,
+query or thread subscription found a thread: with `root_lists`, that is
+what "the series you follow" means beyond an author's own
+(`views::follows`). A followed thread is fetched on every sync while its
+series is open, and refetched when stale after that; the first fetch may
+name any message of the thread, and its top becomes the root. "As of" stays the time a *whole thread* was last
 fetched: an incremental search that finds nothing new is not a fetch of
 the thread, because a reply that does not copy the author would not show
 up in it. The weekly refresh bounds how stale that can get. Validated
 2026-10-26: after an incremental sync, all 34 versions had the same state
 as in a fresh full sync; a quiet incremental sync took 0.5 s against 43 s.
 
-## Configuration
+## Settings
 
-User preferences go in the TOML config (`config.py`), data in the store.
-`config.settings()` is loaded once in `main()` as `args.settings`.
-Command-line options override it, and it overrides the built-in defaults.
-Every section and key is declared in `config.KNOWN` (trees in
-`TREE_KEYS`), with types in `TYPES`; unknown ones are errors. Tests that
-run the CLI point `XDG_CONFIG_HOME` at an empty directory, so a real
-config cannot leak in. The `bodies` bot rule (for a maintainer whose bot mail, such as a
-binding check, comes from their own address) is unit-tested only: no such mail was in the
-validation data.
+User preferences are settings in the store (`patchtrack_core::settings`):
+JSON values the core validates, so the CLI and the web app accept the same
+things. Command-line options override a setting for one run; settings
+override the built-in defaults. Every key is declared in `settings::KEYS`
+with its shape, default and description; an unknown key or a bad value is
+an error when set, and a key from a newer version is skipped with a
+warning when read. Projects (the `projects` setting, `crates/core/src/projects.rs`) group
+archives and their lists; which projects a series is in is derived (where
+a sync found it, its lists, its To/Cc), never stored, and a claim by a
+list or an exact address beats one by a pattern (git@vger is Git's, not
+Linux's). Subscriptions, sync records, `found_by`, `root_lists` and
+owed threads carry their archive ("" for the `archive` setting's), and
+each archive gets its own `Sync`, one after another. Every setting has an
+`input` kind, which the web app's settings page draws its control from.
+What you follow is `subscriptions`; this machine's
+local mail paths and git trees are the `sources` and `trees` tables,
+which no export carries. The `bodies` bot rule (for a maintainer whose bot
+mail, such as a binding check, comes from their own address) is
+unit-tested only: no such mail was in the validation data.
 
 ## Schema
 
-`store.MIGRATIONS` is applied in order on open, counted by
-`PRAGMA user_version`. Add to the end, never edit a shipped entry. A new
-column is empty on old rows until their mail is fetched again, so say in
-the migration's comment what repopulates it (usually `sync --full`).
+`patchtrack-store`'s `MIGRATIONS` are applied in order on open, counted by
+`PRAGMA user_version`; a store from a newer patchtrack is refused. Add to
+the end, never edit a shipped entry, and say in the migration's comment
+what fills a new column on old rows. Messages are stored raw, with the
+parsed columns and `parsed_with`: raising `mail::PARSER_VERSION` makes
+every open re-parse old rows, so a parser change never needs a refetch.
 
-## Performance (measured 2026-10-27)
+## Performance
 
 Series are rebuilt from the stored mail on every command. With 20,000
-messages (1,000 series of 4 patches and 15 replies), `build()` takes 0.22
-s and `list` 0.49 s end to end. Storing them took 10 s (0.5 ms each).
-Nothing needs caching at contributor scale.
+messages (1,000 series of 4 patches and 15 replies), the Python version
+built them in 0.22 s and stored them in 10 s (2026-10-27); the Rust store
+imports them in 0.34 s, and reads and groups them in 0.08 s (2026-10-28,
+ARCHITECTURE.md). The bridge keeps what it derived until the store
+changes, so the app's many reads of an unchanged store cost nothing.
 
 ## Testing
 
-`PYTHONPATH=src:tests python3 -m unittest discover -s tests -v`. Tests use synthetic mail built
-with `email.message`; nothing touches the network. When adding a
-heuristic, add a positive *and* a negative case, and check that the test
-fails when the heuristic is broken (plant the bug, watch it fail, revert).
-The anchored regexes in `parse.py` already reject `>`-quoted lines, so a
+```sh
+export PATH=$HOME/.cargo/bin:$PATH        # rustup's toolchain before any system one
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
+(cd web && npm ci && npm test && npm run build)   # when web/ or the model changes
+(cd web && npm run build) && cargo build -p patchtrack && python3 web/e2e/run.py   # the app in Firefox
+```
+
+A test that needs a Unix shell (an editor, a sendmail command, a fake
+b4) goes in `mod unix` at the end of crates/cli/tests/cli.rs, with its
+helpers: Windows' clippy refuses a helper only such tests use. To see
+what Windows sees, switch the module off (`#[cfg(any())]`) and run clippy.
+
+Tests use synthetic mail; nothing touches the network (sync is tested
+against an archive in memory, and the CLI against one on 127.0.0.1). Tree
+and branch tests make throwaway git repositories. When adding a heuristic,
+add a positive *and* a negative case, and check that the test fails when
+the heuristic is broken (plant the bug, watch it fail, revert). The
+anchored regexes in `evidence.rs` already reject `>`-quoted lines, so a
 test of quote stripping alone proves nothing.
 
-CI (`.github/workflows/tests.yml`) runs the suite on Python 3.11–3.15
-and checks that the installed command starts. 3.11 is the floor (for
-`tomllib`); the whole suite has passed on 3.11 in the `python:3.11`
-container and on 3.15 locally.
+For anything that changes states, compare with the Python version on real
+mail, and explain every difference:
+
+```sh
+git worktree add /tmp/pt-python python-last   # the last commit with the Python version
+cargo build --release -p patchtrack
+mkdir -p /tmp/pt-python/target/release && cp target/release/patchtrack /tmp/pt-python/target/release/
+python3 /tmp/pt-python/tools/parity.py WEEK.mbox /tmp/scratch.sqlite3
+```
+
+Fetch a week with one request (the script's docstring says how); it is
+real people's mail, so it stays out of the repository.
+
+CI (`.github/workflows/`) runs the Rust checks on Linux and Windows, the
+web app's tests and build, and the book.
 
 For a live check, sync a real author into a scratch `--db` and compare
 against what is known by hand. The first validation (2026-10-26, one
@@ -290,10 +347,8 @@ the one it was written for).
 
 ## Known gaps and next steps
 
-Done: sync that cannot silently miss mail, your own mailbox as a source,
-config for authors/lists/trees, `news`, `read`/`open`, `nudge` and
-`close`, `diff`, `branches`, GitHub readiness, project profiles and the
-TUI. What is left, roughly in order of value:
+What to do next is in HANDOFF.md while a handoff is in progress. Known
+misses carried over from the Python version:
 
 1. **Heuristics with known misses:**
    - `commented`, and so `nudge`'s "reply owed": a process note replying
@@ -311,21 +366,11 @@ TUI. What is left, roughly in order of value:
 4. **Other archives**: git's "What's cooking" is not parsed (use its
    branches as trees). Mailman and PostgreSQL archives are not
    public-inbox. DPDK's search is behind a bot check.
-5. **Board**: per list works (`-l`); `--all-versions` does not exist yet.
-   The web frontend's data is `export`/`serve`; `news` and `nudge` are
-   not documents yet, and there is no write endpoint.
-   The docs have a systemd timer for `sync && check --fetch; board`
-   (`docs/scheduling.rst`).
-6. **Old rows** stored before a migration lack its columns until they are
-   fetched again (`sync --full`, `check`).
-7. **Releasing**: `.github/workflows/release.yml` publishes to PyPI when
-   a GitHub release is published, through Trusted Publishing (no token).
-   It refuses a tag that does not match `__version__`, runs the tests,
-   and checks the build with `twine check --strict`. Publishing a release
-   is the owner's step.
 
 ## Contributions
 
 No LLM trailers in commits (`Assisted-by:`, `Co-authored-by:` naming a
 model or assistant). If a change was developed with an LLM coding
-assistant, say so in prose in the commit message or PR description.
+assistant, say so in prose in the commit message or PR description
+("Developed with an LLM coding assistant."), and never say which
+assistant or model it was.
