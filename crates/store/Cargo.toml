@@ -1,0 +1,16 @@
+[package]
+name = "patchtrack-store"
+description = "patchtrack's store: one SQLite schema, natively and in the browser"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["email", "patch", "sqlite", "public-inbox"]
+categories = ["email", "database"]
+
+[dependencies]
+patchtrack-core.workspace = true
+rusqlite = { version = "0.41", features = ["bundled"] }

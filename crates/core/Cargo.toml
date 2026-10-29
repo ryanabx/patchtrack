@@ -1,0 +1,36 @@
+[package]
+name = "patchtrack-core"
+description = "patchtrack's model and derivation: mail in, series and states out. No I/O."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["email", "patch", "public-inbox", "lore", "kernel"]
+categories = ["email", "development-tools"]
+
+[dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+mail-parser = "1"
+# Unicode \w, \s, \b and case folding, as Python's re has them; not the
+# \p{...} tables, which no pattern uses.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case"] }
+serde = { version = "1", features = ["derive"], optional = true }
+# Settings are JSON values in the store.
+serde_json = "1"
+ts-rs = { version = "12", optional = true }
+
+[dev-dependencies]
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+# Unicode \w, \s, \b and case folding, as Python's re has them; not the
+# \p{...} tables, which no pattern uses.
+regex = { version = "1", default-features = false, features = ["std", "perf", "unicode-perl", "unicode-case"] }
+
+[features]
+# Serialize the model: for --json, and for the web app (through the bridge).
+serde = ["dep:serde"]
+# TypeScript types for the model, written by `cargo test --features ts` (see
+# .cargo/config.toml): the web app's side of the contract.
+ts = ["serde", "dep:ts-rs"]

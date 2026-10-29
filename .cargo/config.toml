@@ -1,0 +1,5 @@
+[env]
+# Where `cargo test -p patchtrack-core --features ts` writes the TypeScript
+# types of the model, for the web app; integers are plain numbers there.
+TS_RS_EXPORT_DIR = { value = "web/src/core", relative = true }
+TS_RS_LARGE_INT = "number"

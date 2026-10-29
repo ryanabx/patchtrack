@@ -1,0 +1,38 @@
+name: rust
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain rust-toolchain.toml pins
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component rustfmt,clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      # `send` delivers through git send-email, packaged apart from git; its
+      # test is skipped where it is missing.
+      - name: git send-email, for the send test
+        continue-on-error: true
+        run: sudo apt-get update -q && sudo apt-get install -y -q git-email
+      - name: Tests (synthetic mail only, no network)
+        run: cargo test --workspace
+
+  # Windows is a release target: the native binary's tests must pass there too.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: The toolchain rust-toolchain.toml pins
+        shell: bash
+        run: |
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --component clippy
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests (synthetic mail only, no network)
+        run: cargo test --workspace --no-fail-fast
