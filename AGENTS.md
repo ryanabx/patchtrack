@@ -111,9 +111,10 @@ The site is https://ryanabx.github.io/patchtrack. The book is in `book/`
 but the bridge's address and token (decided 2026-10-29: the app was not
 much use without a way to sync, and importing files into a browser was
 clumsy). The bridge reads, derives and changes the store on its machine
-(`api.rs`: `GET`s to read, `POST`s of JSON to change), syncs it on its
-own (when it starts, every `sync_every` minutes, after a follow, and when
-asked), sends mail and runs b4. The app polls `/v1/status` and reads
+(`api.rs`: `GET`s to read, `POST`s of JSON to change), runs its own jobs
+one at a time (a sync when it starts, every `sync_every` minutes, after a
+follow and when asked; the threads you open; pages of an inbox you
+browse), sends mail and runs b4. The app polls `/v1/status` and reads
 again when the store's generation changes, so a sync or a command in a
 terminal shows up without a reload. Its types are generated from the
 Rust (ts-rs, `npm run types`); CI fails if they differ. It cannot fetch
@@ -210,6 +211,19 @@ the thread, because a reply that does not copy the author would not show
 up in it. The weekly refresh bounds how stale that can get. Validated
 2026-10-26: after an incremental sync, all 34 versions had the same state
 as in a fresh full sync; a quiet incremental sync took 0.5 s against 43 s.
+
+**What is fetched whole** (decided 2026-10-29, to make far fewer
+requests): an author's threads and followed threads, on every sync. A
+followed list's or query's series are what the search returned (the
+postings, and replies that matched), with no thread fetched; so are an
+inbox's series when the web app browses it (one search for `s:PATCH` per
+page of two days, `Plan::until` for an older page, which records no sync).
+Opening a series in the app fetches its thread when it never was or is
+older than `stale_minutes` (30), or on Refresh: the bridge marks it wanted
+(`threads.wanted_at`) and fetches what is wanted, as a sync of no
+searches does, one request each. `fetch_all_threads` brings back fetching
+every thread a list finds. A series whose thread was never read whole has
+`Summary.fetched` false, and says "not fetched".
 
 ## Settings
 

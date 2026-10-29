@@ -8,7 +8,7 @@ import type { Family } from "./core/Family";
 import type { FileChange } from "./core/FileChange";
 import type { Person } from "./core/Person";
 import type { Summary } from "./core/Summary";
-import type { Added, Draft, Kind, ReviewComment, Notifications, Nudge, Projects, Scope, Setting, Source, Status, Subscription, Who } from "./protocol";
+import type { Added, Draft, Inbox, Kind, ReviewComment, Notifications, Nudge, Projects, Scope, Setting, Source, Status, Subscription, Who } from "./protocol";
 
 /** Where the bridge listens, and the token that pairs this app with it. */
 export type Bridge = { url: string; token: string };
@@ -65,6 +65,23 @@ export class Store {
   /** Ask the bridge to sync now. */
   sync(): Promise<{ sync: Status["sync"] }> {
     return this.post("/v1/sync", {});
+  }
+
+  /**
+   * A series is opened: the bridge fetches its thread if it never did, or
+   * longer ago than the stale_minutes setting, or when `force`d.
+   */
+  open(root: string, force = false): Promise<{ fetching: boolean; as_of: string | null }> {
+    return this.post("/v1/open", { root, force });
+  }
+
+  /** List a page of an inbox's series: the latest, or what came before `before` (a time). */
+  browse(project: string, inbox: string, before?: string): Promise<unknown> {
+    return this.post("/v1/browse", before ? { project, inbox, before } : { project, inbox });
+  }
+
+  inboxes(): Promise<Inbox[]> {
+    return this.get("/v1/inboxes");
   }
 
   /** One line per family, for the list. */

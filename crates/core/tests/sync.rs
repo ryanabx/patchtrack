@@ -455,7 +455,7 @@ fn theirs() -> (String, Vec<Vec<u8>>) {
 }
 
 #[test]
-fn a_list_searches_the_whole_inbox_and_fetches_every_series_it_finds() {
+fn a_list_searches_the_whole_inbox_and_keeps_what_it_finds_without_fetching_it() {
     let (mine, mut mails) = posting("a", "Mon, 05 Oct 2026 10:00:00 +0000");
     let (other, more) = theirs();
     mails.extend(more);
@@ -468,6 +468,18 @@ fn a_list_searches_the_whole_inbox_and_fetches_every_series_it_finds() {
     });
     // No author in the query, only the window; the first one starts at the wide start.
     assert!(run.urls[0].starts_with("https://lore.example.org/linux-usb/?x=m&q=rt%3A1792000000.."), "{:?}", run.urls);
+    // One request: what the search returned is kept, and no thread is fetched
+    // until it is asked for.
+    assert_eq!((run.urls.len(), run.fetched.len()), (1, 0), "{:?}", run.urls);
+    assert!(store.found[&other].contains(&usb) && store.found[&mine].contains(&usb));
+    assert!(store.pending.is_empty());
+    // Every thread, when the plan says so (the fetch_all_threads setting).
+    let mut store = Model::default();
+    let run = store.sync(&archive, |p| {
+        p.searches = vec![usb.clone()];
+        p.first_since_wide = 1_792_000_000;
+        p.wide_threads = true;
+    });
     assert_eq!(run.fetched, vec![mine.clone(), other.clone()]);
     assert!(store.found[&other].contains(&usb) && store.found[&mine].contains(&usb));
     assert!(run.logs.iter().any(|l| l.starts_with("every series on linux-usb: 5 messages (5 new), full window")));
@@ -477,12 +489,32 @@ fn a_list_searches_the_whole_inbox_and_fetches_every_series_it_finds() {
 }
 
 #[test]
+fn an_older_page_searches_up_to_its_end_and_records_nothing() {
+    let (_, mails) = theirs();
+    let archive = Archive { mails, ..Archive::default() };
+    let q = follow(Follow::Query, "s:PATCH", "linux-usb");
+    let mut store = Model::default();
+    let run = store.sync(&archive, |p| {
+        p.searches = vec![q.clone()];
+        p.since = Some(1_792_000_000);
+        p.until = Some(1_792_100_000);
+    });
+    let want = sync::form_quote("(s:PATCH) AND rt:1792000000..1792100000");
+    assert_eq!(run.urls, [format!("https://lore.example.org/linux-usb/?x=m&q={want}")]);
+    // Nothing recorded: the next sync of the latest is not misled into thinking it covered now.
+    assert!(store.last_sync.is_empty());
+}
+
+#[test]
 fn a_query_is_searched_as_given_in_its_inbox() {
     let (other, mails) = theirs();
     let archive = Archive { mails, ..Archive::default() };
     let q = follow(Follow::Query, "dfn:drivers/usb/", "linux-usb");
     let mut store = Model::default();
-    let run = store.sync(&archive, |p| p.searches = vec![q.clone()]);
+    let run = store.sync(&archive, |p| {
+        p.searches = vec![q.clone()];
+        p.wide_threads = true;
+    });
     let want = format!("https://lore.example.org/linux-usb/?x=m&q={}", sync::form_quote("(dfn:drivers/usb/) AND rt:"));
     assert!(run.urls[0].starts_with(&want), "{:?}", run.urls);
     assert_eq!(run.fetched, vec![other.clone()]);

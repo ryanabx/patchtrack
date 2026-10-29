@@ -345,3 +345,21 @@ tr.line-comment td { padding: .5rem 1rem; background: var(--bg); border-top: 1px
 .unread-dot { width: 8px; height: 8px; margin-top: .5rem; border-radius: 50%; background: var(--discussed); flex: none; }
 .notification-side { display: flex; flex-direction: column; align-items: flex-end; gap: .3rem; font-size: 12px; color: var(--muted); }
 .notifications-head { display: flex; align-items: center; }
+
+/* A series whose thread was never fetched: only a search's mail is known. */
+.label.unfetched { border-style: dashed; color: var(--muted); }
+
+/* Inboxes: the inboxes on the left, one inbox's series on the right. */
+.inboxes { display: grid; grid-template-columns: 14rem minmax(0, 1fr); gap: 2rem; }
+@media (max-width: 50rem) { .inboxes { grid-template-columns: 1fr; } }
+.inbox-list { font-size: 13px; }
+.inbox-list h3 { font-size: 12px; color: var(--muted); margin: 1rem 0 .4rem; }
+.inbox-list .current { font-weight: 600; }
+.inbox-open input { width: 100%; box-sizing: border-box; padding: .35rem .5rem; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); }
+.inbox-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.inbox-head h1 { margin: 0; }
+.inbox-more { margin-top: .75rem; }
+.pr-title-row .refresh { margin-top: 1.4rem; white-space: nowrap; }
+.note.fetching::before { content: "↻ "; }
+@media (max-width: 40rem) { .pr-title-row .refresh { margin-top: 0; align-self: flex-start; } }

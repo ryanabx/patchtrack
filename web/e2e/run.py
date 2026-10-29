@@ -44,6 +44,15 @@ MAILS = [
     "References: <cover@x> <p1@x>\nDate: Tue, 06 Oct 2026 10:00:00 +0000\n\nReviewed-by: Rev <rev@x>\n",
 ]
 
+# A stranger's series on linux-usb: a listing of the inbox finds the posting;
+# only its thread, fetched when it is opened, has the reply.
+STRANGER = [
+    "Message-ID: <stranger@x>\nFrom: Stranger <stranger@y.org>\nTo: linux-usb@vger.kernel.org\n"
+    f"Subject: [PATCH] usb: a stranger's fix\nDate: {DATE}\n\nFix.\n---\n s | 1 +\n",
+    "Message-ID: <stranger-r@x>\nFrom: Rev <rev@x>\nSubject: Re: [PATCH] usb: a stranger's fix\nIn-Reply-To: <stranger@x>\n"
+    "References: <stranger@x>\nDate: Tue, 06 Oct 2026 10:00:00 +0000\n\nOnly in the thread.\n",
+]
+
 
 def mbox(mails):
     return "".join(f"From mboxrd@z Thu Jan  1 00:00:00 1970\n{m}\n" for m in mails)
@@ -87,12 +96,13 @@ class Archive(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         Archive.seen.append(("POST", self.path, self.headers.get("User-Agent", "")))
-        self.answer(MAILS)
+        # Browsing an inbox searches s:PATCH: it finds the stranger's posting too.
+        self.answer(MAILS + STRANGER[:1] if "s%3APATCH" in self.path else MAILS)
 
     def do_GET(self):
         Archive.seen.append(("GET", self.path, self.headers.get("User-Agent", "")))
         root = self.path.split("/")[2]
-        self.answer([m for m in MAILS if root in m])
+        self.answer([m for m in MAILS + STRANGER if root in m])
 
 
 failures = []
@@ -116,7 +126,7 @@ def link_in(log, pattern=r"(http://127\.0\.0\.1:\d+/#/bridge\S+)"):
 
 def open_family(m, title, query=""):
     """Go to the series titled `title` from the list; its page's address."""
-    m.js("location.hash = '/'; return 1")
+    m.js("location.hash = '/?who=everyone'; return 1")
     href = m.wait(f"return [...document.querySelectorAll('.row a')].find(a => a.textContent.includes({title!r}))?.getAttribute('href')")
     m.js(f"location.hash = {href!r}.replace(/^#/, '').split('?')[0] + {query!r}; return 1")
     return href
@@ -203,6 +213,9 @@ def main():
         m.reload(app)
         check("a reload connects again", m.wait("return !!document.querySelector('.row-meta')"))
 
+        # The list shows what you follow; everyone's is a click away.
+        m.js("location.hash = '/?who=everyone'; return 1")
+        m.wait("return document.querySelector('.segmented .selected')?.textContent === 'Everyone'")
         # The command line changes the store; the page shows it without a reload.
         published = os.path.join(tmp, "published.mbox")
         with open(published, "w") as f:
@@ -231,7 +244,7 @@ def main():
         added = m.wait("return document.querySelector('.results li')?.textContent")
         check("only what you follow is kept", added and "3 messages, 2 kept, 2 new" in added, added)
         check("in the bridge's store", "baz: mine too" in cli("list", "--everyone").stdout)
-        m.js("location.hash = '/'; return 1")
+        m.js("location.hash = '/?who=everyone'; return 1")
         rows = m.wait("return [...document.querySelectorAll('.row-title')].map(e => e.textContent).join('|').includes('baz') && "
                       "[...document.querySelectorAll('.row-title')].map(e => e.textContent).join('|')")
         check("and listed, without the stranger's", rows and "qux" not in rows, rows)
@@ -396,7 +409,7 @@ def main():
         card = m.wait("return document.querySelector('#setting-projects .card[data-project=\"GCC\"]')?.textContent")
         check("a built-in project is added", card and "gcc-patches" in card, card)
         check("sync_every has a control", m.js("return document.querySelector('#setting-sync_every input')?.type") == "number")
-        m.go(app + "#/")
+        m.go(app + "#/?who=everyone")
         tabs = m.wait("return [...document.querySelectorAll('.projects .project')].map(a => a.textContent).join('|')")
         check("the list has its projects", tabs and "All projects" in tabs and "GCC" in tabs, tabs)
         m.js("""const s = document.querySelector('select[aria-label="State"]'); s.value = 'reviewed';
@@ -522,6 +535,53 @@ def main():
                 break
             time.sleep(0.1)
         check("Sync now syncs", len(Archive.seen) > before, Archive.seen[before:])
+
+        # An inbox, browsed: one search lists its series, and no thread is fetched
+        # until one is opened, which fetches it.
+        before = len(Archive.seen)
+        m.go(app + "#/inboxes/linux-usb")
+        row = m.wait("return [...document.querySelectorAll('.inbox-main .row')].find(r => r.textContent.includes(\"a stranger's fix\"))?.textContent", 30)
+        asked = Archive.seen[before:]
+        check("an inbox opened for the first time is listed, in one search", row and "not fetched" in row
+              and [a[0] for a in asked] == ["POST"] and "s%3APATCH" in asked[0][1] and asked[0][1].startswith("/linux-usb/"), (row, asked))
+        m.js("[...document.querySelectorAll('.inbox-main .row a.title-link')].find(a => a.textContent.includes(\"a stranger's fix\")).click(); return 1")
+        reply = m.wait("return !!document.querySelector('.msg[data-msgid=\"stranger-r@x\"]') && !document.querySelector('.unfetched-note, .fetching')", 30)
+        threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET"]
+        check("opening a series fetches its thread, once", reply and threads == ["/linux-usb/stranger@x/t.mbox.gz"], (reply, threads))
+        time.sleep(1)
+        m.reload(app, m.js("return location.hash"))
+        m.wait("return !!document.querySelector('.msg[data-msgid=\"stranger-r@x\"]')")
+        time.sleep(1)
+        threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET"]
+        check("opened again soon after, it is not fetched again", len(threads) == 1, threads)
+        m.js("document.querySelector('button.refresh').click(); return 1")
+        for _ in range(100):
+            threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET"]
+            if len(threads) == 2:
+                break
+            time.sleep(0.1)
+        check("Refresh fetches it again", len(threads) == 2, threads)
+        m.go(app + "#/inboxes/linux-usb")
+        row = m.wait("return [...document.querySelectorAll('.inbox-main .row')].find(r => r.textContent.includes(\"a stranger's fix\"))?.textContent")
+        check("and the inbox no longer says it is not fetched", row and "not fetched" not in row, row)
+        m.go(app + "#/")
+        mine = m.wait("return !!document.querySelector('.row') && [...document.querySelectorAll('.row-title')].map(e => e.textContent).join('|')")
+        m.go(app + "#/?who=everyone")
+        everyone = m.wait("return [...document.querySelectorAll('.row-title')].map(e => e.textContent).join('|').includes('stranger') && "
+                          "[...document.querySelectorAll('.row-title')].map(e => e.textContent).join('|')")
+        check("the series list shows what you follow, and everyone's a click away", mine and "stranger" not in mine and everyone, (mine, everyone))
+        m.go(app + "#/inboxes/linux-usb")
+        listed = len(Archive.seen)
+        m.wait("return [...document.querySelectorAll('.inbox-main button')].some(b => b.textContent === 'Load older' && !b.disabled)")
+        m.js("[...document.querySelectorAll('.inbox-main button')].find(b => b.textContent === 'Load older').click(); return 1")
+        for _ in range(100):
+            if len(Archive.seen) > listed:
+                break
+            time.sleep(0.1)
+        older = Archive.seen[listed:]
+        rt = re.search(r"rt%3A(\d+)\.\.(\d+)", older[0][1]) if older else None
+        check("Load older searches the two days before what was listed", rt and int(rt.group(2)) - int(rt.group(1)) == 2 * 86400
+              and int(rt.group(2)) < time.time() - 86400, older)
 
         # A bridge reached from elsewhere: behind a tunnel that speaks HTTPS (here a proxy with a
         # certificate of its own) and named by --public-url. The app asks before it pairs.

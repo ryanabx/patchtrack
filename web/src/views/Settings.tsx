@@ -13,7 +13,7 @@ type Save = (value: unknown) => Promise<void>;
 const GROUPS: Array<[string, string, string[]]> = [
   ["You", "Who you are: which series are yours, and how mail you write is signed.", ["identities", "name"]],
   ["Projects", "The archives and lists you work with, as GitHub has repositories.", ["projects"]],
-  ["Syncing", "Where, how often and how far back the bridge syncs.", ["archive", "sync_every", "since", "list_since", "window_days", "refresh_days"]],
+  ["Syncing", "Where, how often and how far back the bridge syncs.", ["archive", "sync_every", "since", "list_since", "window_days", "refresh_days", "fetch_all_threads", "stale_minutes"]],
   ["Nudges", "When Needs you suggests a ping or a RESEND.", ["ping_days", "resend_days", "merge_window"]],
   ["b4", "", ["b4_prefix"]],
   ["Advanced", "How a project says approved and landed, and whose replies are not review.", ["profiles", "bots"]],
@@ -29,6 +29,8 @@ const TITLES: Record<string, string> = {
   window_days: "Search window, in days",
   refresh_days: "Refetch open series after, in days",
   sync_every: "Sync every, in minutes (0: only when asked)",
+  fetch_all_threads: "Fetch every thread a followed list or search finds",
+  stale_minutes: "Fetch a series again when opened, after this many minutes (0: only on Refresh)",
   ping_days: "Suggest a ping after, in days",
   resend_days: "Suggest a RESEND after, in days",
   merge_window: "Hold pings while the merge window is open",

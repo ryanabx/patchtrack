@@ -212,8 +212,18 @@ HTTPS proxy, serving the built app too) are one server:
   seconds while it is shown, and refreshes in place.
 - **It syncs on its own**: when it starts, every `sync_every` minutes (a
   setting, 30 by default; 0 for only when asked), after a follow, and on
-  "Sync now"; one sync at a time, the same code as `patchtrack sync`.
-  Its log is in `/v1/status`.
+  "Sync now"; the same code as `patchtrack sync`. Its log is in
+  `/v1/status`.
+- **It fetches little by default** (decided 2026-10-29): an author's
+  threads and followed threads whole, on every sync; a followed list's or
+  query's series only as their search returned them. The app's Inboxes
+  page lists an inbox's latest series as lore's own pages do, one search
+  (`s:PATCH`) per page of two days and no thread fetched. A thread is
+  fetched when its series is opened and was never fetched or is older
+  than `stale_minutes` (30), or on Refresh; a series never fetched whole
+  says so. Syncs, the threads you open and inbox pages are jobs of one
+  queue, run one at a time, each through `sync::Sync`, so as politely as
+  any sync.
 - **Who may ask**: requests naming another Host than 127.0.0.1, localhost
   or the names it was given are refused (DNS rebinding); CORS is
   answered for the app's origins only, never `*`; every API request

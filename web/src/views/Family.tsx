@@ -940,7 +940,7 @@ export function FamilyView({
   store: Store;
   route: FamilyRoute;
   onChanged: () => void;
-  /** Its notification was marked read. */
+  /** Ask the bridge's status again: a notification was read, or a thread asked for. */
   onRead: () => void;
   /** Changes when the store does: the family is fetched again. */
   version: unknown;
@@ -958,6 +958,10 @@ export function FamilyView({
   }, [found?.sender, found?.key, route.tab, version]);
   const head = found ? found.versions[found.versions.length - 1] : null;
   const s = found ? ([...found.versions].reverse().find((v) => v.version === route.v) ?? head) : null;
+  // Opening a version fetches its thread when it never was, or is stale.
+  useEffect(() => {
+    if (s) store.open(s.root).then((r) => r.fetching && onRead(), () => {});
+  }, [s?.root]);
   // The version's conversation: its messages, and its patches for Commits and Files changed.
   const [loaded, setLoaded] = useState<Loaded>({ entries: null, error: null });
   // Blank for another version; a change to the store is shown in place, where you are.
@@ -1001,7 +1005,7 @@ export function FamilyView({
       <div class="blankslate">
         <h2>No such series</h2>
         <p>
-          <a href={href({ view: "list", tab: "open", q: "", who: "everyone" })}>Back to the series</a>
+          <a href={href({ view: "list", tab: "open", q: "", who: "followed" })}>Back to the series</a>
         </p>
       </div>
     );
@@ -1031,6 +1035,15 @@ export function FamilyView({
           <h1>
             {head.title} <span class="muted">v{s.version}</span>
           </h1>
+          <button
+            type="button"
+            class="button refresh"
+            disabled={s.pending}
+            title="Fetch this version's thread from the archive again"
+            onClick={() => store.open(s.root, true).then(onRead, () => {})}
+          >
+            ↻ Refresh
+          </button>
           <GetMenu s={s} archive={archive} url={found.urls[s.root] ?? messageUrl(archive, s.root)} />
         </div>
         <div class="pr-meta">
@@ -1082,6 +1095,19 @@ export function FamilyView({
           </select>
         </span>
       </nav>
+      {s.pending ? (
+        <p class="note fetching">Fetching this version's thread from {archive.replace(/^https?:\/\//, "")}…</p>
+      ) : (
+        !s.as_of &&
+        !s.local_as_of && (
+          <p class="note unfetched-note">
+            Not fetched yet: only what a search returned is here, so there may be more replies.{" "}
+            <button type="button" class="button small" onClick={() => store.open(s.root, true).then(onRead, () => {})}>
+              Fetch it
+            </button>
+          </p>
+        )
+      )}
       {s !== head && (
         <p class="viewing">
           Viewing v{s.version}, not the latest.{" "}

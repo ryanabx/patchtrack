@@ -22,6 +22,12 @@ pairs it. Then:
   something, and when you press "Sync now" on the Following page. The app
   notices whatever changes the store (a sync, a command you run in a
   terminal) within seconds, and shows it without a reload;
+- it fetches little: your authors' threads and the threads you follow
+  whole, but a followed list's series only as its search returned them.
+  The Inboxes page lists any inbox's latest series the same way, a page
+  at a time. Opening a series fetches its thread, when it never was or
+  was more than `stale_minutes` (30) ago; Refresh fetches it now. A
+  series not fetched yet says so;
 - mail you drop on the Add mail page is imported into that store, and the
   mailboxes you added with `patchtrack source add` are read on every sync;
 - with `--allow-send`, a draft (a reply, a review tag) has a Send button:

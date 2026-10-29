@@ -81,14 +81,26 @@ export type Project = { name: string; archive: string; lists: string[]; recipien
 /** Your projects, the built-in ones, and the archive setting's archive. */
 export type Projects = { projects: Project[]; presets: Project[]; archive: string };
 
+/**
+ * An inbox to browse: in a project ("" for none), how many series it has
+ * here, when it was last listed, and how far back it has been listed.
+ */
+export type Inbox = { project: string; inbox: string; listed: string | null; since: string | null; series: number };
+
 /** Local mail the bridge reads on each sync (`patchtrack source add`). */
 export type Source = { path: string; read_at: string | null };
 
-/** The bridge's own syncs: one running, or when the last finished and how. */
+/** The bridge's own jobs: a sync running, or when the last finished and how; threads and inbox pages. */
 export type SyncStatus = {
   running: boolean;
-  /** A sync is wanted as soon as the one running is done. */
+  /** A sync is wanted as soon as the job running is done. */
   asked: boolean;
+  /** What the bridge does now, in a few words, if anything. */
+  doing: string | null;
+  /** Threads opened in the app are being fetched, or wait to be. */
+  threads: boolean;
+  /** Inboxes being listed, or waiting to be. */
+  browsing: string[];
   started: string | null;
   finished: string | null;
   /** Whether the last sync finished with nothing failed. */

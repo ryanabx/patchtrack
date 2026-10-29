@@ -114,7 +114,11 @@ export function Following({ store, status, onAsked, version }: Props) {
         </button>
       </form>
       {(kind === "list" || kind === "query") && (
-        <p class="note">A list or a search finds far more than one author: its first sync goes back only as far as the list_since setting, and each thread it finds is a request.</p>
+        <p class="note">
+          A list or a search finds far more than one author: its first sync goes back only as far as the list_since setting, and its
+          series are what the search returned until you open one, which fetches its thread. (The fetch_all_threads setting fetches
+          every one, a request each.)
+        </p>
       )}
       {error && <p class="error">{error}</p>}
       <h2>Syncing</h2>

@@ -268,6 +268,12 @@ enum Command {
     /// Then the whole thread of every series the search touched is fetched,
     /// because a reply that does not copy the author is only in the thread.
     ///
+    /// A followed list's or search's series are kept as the search returned
+    /// them, with no thread fetched: one request per thread would be far too
+    /// many. Opening one in the web app fetches it; so does following it as
+    /// a thread. The fetch_all_threads setting fetches every one, as an
+    /// author's are.
+    ///
     /// With no -a, it syncs the authors you follow, in the lists you follow
     /// them in (see `follow`); -a and -l replace them for one run.
     ///
@@ -292,13 +298,14 @@ enum Command {
     ///
     /// An author's series and the replies to them; with --inbox, every
     /// series posted to an inbox (a maintainer's queue); with --query, what
-    /// a public-inbox search finds, and the threads it is in; with --thread,
+    /// a public-inbox search finds; with --thread,
     /// one thread, by a message-id or its archive URL. -l limits an
     /// author's or a query's searches to one inbox (repeatable); the default
     /// searches every list ("all"). A list or a query finds far more than
     /// an author: its first sync goes back only as far as the list_since
-    /// setting, and each thread it finds is a request. Following is kept in
-    /// the store, so an exported store follows the same.
+    /// setting, and its series are what the search returned, until a thread
+    /// is fetched (see `sync`). Following is kept in the store, so an
+    /// exported store follows the same.
     Follow {
         #[command(flatten)]
         what: Followed,
@@ -827,7 +834,7 @@ pub(crate) fn now_ms() -> u64 {
 }
 
 /// An HTTP client that reports every status as an answer, with our User-Agent.
-fn http_agent() -> ureq::Agent {
+pub(crate) fn http_agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .http_status_as_error(false)
         .timeout_global(Some(Duration::from_secs(120)))
@@ -1048,28 +1055,42 @@ pub(crate) fn sync_store(
         plan.window_days = args.window_days.unwrap_or(plan.window_days);
         plan.delay_ms = (args.delay.max(0.0) * 1000.0) as u64;
         plan.threads = !args.no_threads;
-        let known = Known {
-            messages: store.messages()?,
-            last_sync: store.last_syncs()?,
-            facts: store.facts()?,
-            rules: settings.rules.clone(),
-            local_new: if key.is_empty() { local_new.clone() } else { HashSet::new() },
-        };
-        let mut sync = sync::Sync::new(plan, known);
-        while let Some(effect) = sync.next(now_ms()) {
-            match effect {
-                Effect::Fetch(req) => {
-                    std::thread::sleep(Duration::from_millis(req.not_before.saturating_sub(now_ms())));
-                    let outcome = fetch(&agent, &req);
-                    sync.receive(req.id, outcome, now_ms());
-                }
-                Effect::Log(line) => log(line),
-                other => store.apply(&other)?,
-            }
-        }
-        ok &= !sync.failed();
+        let local_new = if key.is_empty() { local_new.clone() } else { HashSet::new() };
+        ok &= run_plan(store, settings, plan, local_new, &agent, log)?;
     }
     Ok(ok)
+}
+
+/// One archive's sync, carried out: each request made when the plan says,
+/// what it learns stored. False if anything failed.
+pub(crate) fn run_plan(
+    store: &mut Store,
+    settings: &Settings,
+    plan: sync::Plan,
+    local_new: HashSet<String>,
+    agent: &ureq::Agent,
+    log: &mut dyn FnMut(String),
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let known = Known {
+        messages: store.messages()?,
+        last_sync: store.last_syncs()?,
+        facts: store.facts()?,
+        rules: settings.rules.clone(),
+        local_new,
+    };
+    let mut sync = sync::Sync::new(plan, known);
+    while let Some(effect) = sync.next(now_ms()) {
+        match effect {
+            Effect::Fetch(req) => {
+                std::thread::sleep(Duration::from_millis(req.not_before.saturating_sub(now_ms())));
+                let outcome = fetch(agent, &req);
+                sync.receive(req.id, outcome, now_ms());
+            }
+            Effect::Log(line) => log(line),
+            other => store.apply(&other)?,
+        }
+    }
+    Ok(!sync.failed())
 }
 
 /// Subscriptions grouped by archive, the archive setting's ("") first; it

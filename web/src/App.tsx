@@ -10,6 +10,7 @@ import { FamilyView } from "./views/Family";
 import { Following, syncLine } from "./views/Following";
 import { List } from "./views/List";
 import { Notifications } from "./views/Notifications";
+import { Inboxes } from "./views/Inboxes";
 import { People } from "./views/People";
 import { DraftsPage } from "./views/Drafts";
 import { Branches } from "./views/Branches";
@@ -187,6 +188,18 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
   else if (!families) main = <p class="muted loading">Loading…</p>;
   else if (route.view === "add") main = <Add store={store} onAdded={reload} />;
   else if (route.view === "settings") main = <Settings store={store} onChanged={reload} />;
+  else if (route.view === "inboxes")
+    main = (
+      <Inboxes
+        store={store}
+        families={families}
+        inbox={route.inbox}
+        project={route.project}
+        status={status}
+        version={version}
+        onAsked={poll}
+      />
+    );
   else if (route.view === "notifications")
     main = <Notifications store={store} tab={route.tab} version={version} onChanged={poll} />;
   else if (route.view === "drafts") main = <DraftsPage store={store} version={version} />;
@@ -205,7 +218,7 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
         projects={projects}
         tab={route.view === "list" ? route.tab : "open"}
         q={route.view === "list" ? route.q : ""}
-        who={route.view === "list" ? route.who : "everyone"}
+        who={route.view === "list" ? route.who : "followed"}
         project={route.view === "list" ? route.project : undefined}
         list={route.view === "list" ? route.list : undefined}
       />
@@ -230,8 +243,11 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
           {menu ? "✕" : "☰"}
         </button>
         <nav id="pages" class={menu ? "open" : ""}>
-          <a href={href({ view: "list", tab: "open", q: "", who: "everyone" })} class={route.view === "list" || route.view === "family" ? "selected" : ""}>
+          <a href={href({ view: "list", tab: "open", q: "", who: "followed" })} class={route.view === "list" || route.view === "family" ? "selected" : ""}>
             Series
+          </a>
+          <a href={href({ view: "inboxes" })} class={route.view === "inboxes" ? "selected" : ""}>
+            Inboxes
           </a>
           <a href={href({ view: "notifications", tab: "unread" })} class={route.view === "notifications" ? "selected" : ""}>
             Notifications

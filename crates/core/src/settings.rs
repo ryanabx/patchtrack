@@ -76,7 +76,7 @@ pub const KEYS: &[Key] = &[
         shape: "time",
         default: "\"2.weeks.ago\"",
         doc: "How far back a first sync of a followed list or query goes: a list carries far more mail than \
-              one author, and each thread it finds is a request.",
+              one author, and its search returns all of it.",
         input: "time",
     },
     Key {
@@ -99,6 +99,23 @@ pub const KEYS: &[Key] = &[
         default: "30",
         doc: "How often `bridge` and `serve` sync what you follow, in minutes (0: only when asked). Each sync is \
               one search per subscription, and a request per thread that changed.",
+        input: "minutes",
+    },
+    Key {
+        name: "fetch_all_threads",
+        shape: "true or false",
+        default: "false",
+        doc: "Whether a sync fetches every thread a followed list's or search's search finds, one request each. \
+              Otherwise it keeps what the search returned, and a thread is fetched when you open its series. An \
+              author's threads, and threads you follow, are always fetched.",
+        input: "bool",
+    },
+    Key {
+        name: "stale_minutes",
+        shape: "minutes",
+        default: "30",
+        doc: "Opening a series in the web app fetches its thread when it never was, or was longer ago than this \
+              (0: only when you press Refresh).",
         input: "minutes",
     },
     Key {
@@ -166,6 +183,8 @@ pub struct Settings {
     pub window_days: i64,
     pub refresh_days: i64,
     pub sync_every: i64,
+    pub fetch_all_threads: bool,
+    pub stale_minutes: i64,
     pub ping_days: i64,
     pub resend_days: i64,
     pub merge_window: bool,
@@ -186,6 +205,8 @@ impl Default for Settings {
             window_days: 0,
             refresh_days: 0,
             sync_every: 0,
+            fetch_all_threads: false,
+            stale_minutes: 0,
             ping_days: 0,
             resend_days: 0,
             merge_window: false,
@@ -261,6 +282,11 @@ impl Settings {
             }
             "window_days" => self.window_days = days(v)?,
             "refresh_days" => self.refresh_days = days(v)?,
+            "fetch_all_threads" => self.fetch_all_threads = v.as_bool().ok_or("must be true or false")?,
+            "stale_minutes" => {
+                self.stale_minutes =
+                    v.as_i64().filter(|&n| n >= 0).ok_or("must be a whole number of minutes, 0 or more")?
+            }
             "sync_every" => {
                 self.sync_every =
                     v.as_i64().filter(|&n| n >= 0).ok_or("must be a whole number of minutes, 0 or more")?
@@ -348,6 +374,7 @@ impl Settings {
         plan.searches = searches;
         plan.first_since_wide = sync::since(&self.list_since, now)?;
         (plan.window_days, plan.refresh_days) = (self.window_days, self.refresh_days);
+        plan.wide_threads = self.fetch_all_threads;
         Ok(plan)
     }
 }

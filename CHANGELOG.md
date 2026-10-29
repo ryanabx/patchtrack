@@ -29,6 +29,15 @@ match the Python version on real mail, except where noted below.
   per patch quoting each comment's hunk up to its line, the comment
   below, and the summary and tag in a reply to the cover. They are
   drafts, sent only when you say.
+- **Fewer requests to the archive, and inboxes to browse**: a followed
+  list's or search's series are kept as the search returned them, with no
+  thread fetched (the `fetch_all_threads` setting fetches them all); an
+  author's threads and followed threads are fetched as before. The
+  Inboxes page lists any inbox's latest series as lore's pages do, a page
+  of two days per search. Opening a series fetches its thread when it
+  never was or is older than `stale_minutes` (30), and Refresh fetches it
+  now; a series not fetched yet says so. The series list shows what you
+  follow by default.
 - **Notifications**: each series that changed since you read it (a new
   version, a state change, new replies), counted in the bar, until you
   mark it read or open it; what needs a reply, a ping or a RESEND in a

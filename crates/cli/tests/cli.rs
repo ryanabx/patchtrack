@@ -378,10 +378,17 @@ fn follow_a_list_a_query_and_a_thread() {
     // The list's search is the window alone, from list_since; the query's is the query.
     assert!(reqs[0].starts_with("POST /one/?x=m&q=rt%3A1790812800.."), "{reqs:?}");
     assert!(reqs[1].starts_with("POST /two/?x=m&q=%28dfn%3Adrivers%2Fusb%2F%29+AND+rt%3A"), "{reqs:?}");
-    // Each thread once, though the list, the query and the thread all name the same two.
+    // Only the followed thread is fetched, from the inbox it was found in: a list's and a
+    // query's series are what their searches returned, until one is opened.
     let threads: Vec<_> = reqs.iter().filter(|r| r.starts_with("GET")).collect();
-    // From the inbox each was found in.
-    assert_eq!(threads, ["GET /one/cover@x/t.mbox.gz", "GET /one/other@x/t.mbox.gz"], "{reqs:?}");
+    assert_eq!(threads, ["GET /one/cover@x/t.mbox.gz"], "{reqs:?}");
+    // With fetch_all_threads, each thread once, though the list, the query and the thread all name the same two.
+    ok(&db, &["settings", "set", "fetch_all_threads", "true"]);
+    ok_err(&db, &["sync", "--delay", "0", "--full"]);
+    let all = archive.requests();
+    let threads: Vec<_> = all[reqs.len()..].iter().filter(|r| r.starts_with("GET")).collect();
+    assert_eq!(threads, ["GET /one/cover@x/t.mbox.gz", "GET /one/other@x/t.mbox.gz"], "{all:?}");
+    let reqs = all;
     // What you follow is what `list` shows without -a: here, everyone's series it found.
     let titles = ok(&db, &["list", "--color", "never"]);
     assert!(titles.contains("foo: do the thing") && titles.contains("somebody else's patch"), "{titles}");

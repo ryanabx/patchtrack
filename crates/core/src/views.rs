@@ -55,7 +55,12 @@ pub struct Summary {
     pub unanswered: bool,
     /// Replies to the latest version from people (not bots, not its sender).
     pub replies: u32,
+    /// When the latest version was posted.
+    pub posted: String,
     pub last_activity: String,
+    /// Whether the latest version's thread was ever read whole, from the
+    /// archive or your mailbox: if not, only what a search returned is known.
+    pub fetched: bool,
     /// The projects it is in (see `projects::of`); filled by who knows them.
     pub projects: Vec<String>,
 }
@@ -77,7 +82,9 @@ pub fn summary(f: &Family) -> Summary {
         lists: s.lists.clone(),
         unanswered: s.unanswered,
         replies: u32::try_from(s.replies.iter().filter(|r| !r.bot && !r.mine).count()).unwrap_or(u32::MAX),
+        posted: s.date.clone(),
         last_activity: s.last_activity().to_string(),
+        fetched: s.as_of.is_some() || s.local_as_of.is_some(),
         projects: vec![],
     }
 }

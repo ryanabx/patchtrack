@@ -59,6 +59,13 @@ pub struct Plan {
     pub refresh_days: i64,
     /// Fetch the threads now; otherwise they stay owed to the next sync.
     pub threads: bool,
+    /// Fetch the threads a list's or a query's search finds, as an author's
+    /// are. Otherwise what the search returned is all there is of them
+    /// until one is asked for (opened, or followed as a thread).
+    pub wide_threads: bool,
+    /// Search up to here (epoch seconds), not up to now: an older page of a
+    /// list. Such a sync records nothing, so the next one is not misled.
+    pub until: Option<i64>,
     pub delay_ms: u64,
     pub retries: u32,
     /// Search a window again in halves when it returns this many.
@@ -85,6 +92,8 @@ impl Plan {
             window_days: 30,
             refresh_days: 7,
             threads: true,
+            wide_threads: false,
+            until: None,
             delay_ms: 1000,
             retries: 3,
             split_at: SPLIT_AT,
@@ -325,7 +334,7 @@ impl Sync {
             (Some(l), true) => series::parse_utc(l).unwrap_or(first) - DAY,
             _ => self.plan.since.unwrap_or(first),
         };
-        let until = secs(now_ms);
+        let until = self.plan.until.unwrap_or(secs(now_ms));
         let step = self.plan.window_days.max(1) * DAY;
         let mut windows = VecDeque::new();
         let mut start = since;
@@ -362,11 +371,13 @@ impl Sync {
         let parsed: Vec<Message> =
             s.found.iter().filter_map(|r| Message::parse(r)).filter(|m| new.contains(&m.msgid)).collect();
         self.out.push_back(Effect::Store(s.found));
-        self.out.push_back(Effect::RecordSync {
-            sub: s.sub.clone(),
-            query: s.query.clone(),
-            ran_at: mail::utc(secs(now_ms)),
-        });
+        if self.plan.until.is_none() {
+            self.out.push_back(Effect::RecordSync {
+                sub: s.sub.clone(),
+                query: s.query.clone(),
+                ran_at: mail::utc(secs(now_ms)),
+            });
+        }
         self.known.messages.extend(parsed);
 
         let refresh = secs(now_ms) - self.plan.refresh_days * DAY;
@@ -379,6 +390,8 @@ impl Sync {
         // An author's thread is one of their series; a list's or a query's,
         // any series its search found mail of, now or before.
         let sub = &s.sub;
+        // A list's or a query's threads are fetched when asked for, unless the plan says otherwise.
+        let fetch = sub.kind == Follow::Author || self.plan.wide_threads;
         let theirs = |x: &Series| match sub.kind {
             Follow::Author => x.is_by(&sub.value),
             Follow::List => x.lists.contains(&sub.list) || self.known.facts.found_by(&x.root, sub),
@@ -394,7 +407,9 @@ impl Sync {
             };
             if touched {
                 let why = if s.incremental { "new mail" } else { "in the search" };
-                self.roots.entry(x.root.clone()).or_insert_with(|| (why.into(), None));
+                if fetch {
+                    self.roots.entry(x.root.clone()).or_insert_with(|| (why.into(), None));
+                }
                 self.out.push_back(Effect::TagRoot {
                     root: x.root.clone(),
                     list: sub.list.clone(),
@@ -406,7 +421,7 @@ impl Sync {
                 if sub.kind != Follow::Author {
                     self.out.push_back(Effect::Found { root: x.root.clone(), sub: sub.clone() });
                 }
-            } else if s.incremental && theirs(x) && stale(x, refresh) {
+            } else if fetch && s.incremental && theirs(x) && stale(x, refresh) {
                 let why = format!("not fetched for {} days", self.plan.refresh_days);
                 self.roots.entry(x.root.clone()).or_insert((why, None));
             }

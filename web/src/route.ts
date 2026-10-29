@@ -1,5 +1,5 @@
 // Routes live in the location hash, so any static host serves the app:
-//   #/            #/?tab=closed&q=clk&who=mine&p=GCC&l=gcc-patches
+//   #/            #/?tab=closed&q=clk&who=everyone&p=GCC&l=gcc-patches   (the list: followed unless who says otherwise)
 //   #/f/SENDER/KEY?v=2&tab=commits&vs=1&c=2&m=MSGID   (vs: compare with; c: an open commit)
 //   #/add
 //   #/following
@@ -8,6 +8,7 @@
 //   #/branches
 //   #/people?who=followed&bots=1
 //   #/notifications?tab=needs-you
+//   #/inboxes            #/inboxes/linux-usb?p=Linux
 //   #/bridge?url=http://127.0.0.1:47130&token=...   (the link `patchtrack bridge` prints)
 
 import type { Who } from "./protocol";
@@ -33,6 +34,7 @@ export type Route =
   | { view: "branches" }
   | { view: "people"; who: Who; bots: boolean }
   | { view: "notifications"; tab: "unread" | "needs-you" }
+  | { view: "inboxes"; inbox?: string; project?: string }
   | { view: "pair"; url: string; token: string }
   | { view: "missing" };
 
@@ -47,7 +49,8 @@ export function parse(hash: string): Route {
       view: "list",
       tab: params.get("tab") === "closed" ? "closed" : "open",
       q: params.get("q") ?? "",
-      who,
+      // What you follow, unless the address says whose.
+      who: params.get("who") === "mine" ? "mine" : params.get("who") === "everyone" ? "everyone" : "followed",
       project: params.get("p") ?? undefined,
       list: params.get("l") ?? undefined,
     };
@@ -58,6 +61,7 @@ export function parse(hash: string): Route {
   if (path[0] === "drafts" && path.length === 1) return { view: "drafts" };
   if (path[0] === "branches" && path.length === 1) return { view: "branches" };
   if (path[0] === "people" && path.length === 1) return { view: "people", who, bots: params.get("bots") === "1" };
+  if (path[0] === "inboxes" && path.length <= 2) return { view: "inboxes", inbox: path[1], project: params.get("p") ?? undefined };
   if (path[0] === "notifications" && path.length === 1)
     return { view: "notifications", tab: params.get("tab") === "needs-you" ? "needs-you" : "unread" };
   // News and Needs you were pages of their own once.
@@ -105,6 +109,9 @@ export function href(r: Route): string {
     path = "/people";
     if (r.who !== "everyone") params.set("who", r.who);
     if (r.bots) params.set("bots", "1");
+  } else if (r.view === "inboxes") {
+    path = r.inbox ? `/inboxes/${encodeURIComponent(r.inbox)}` : "/inboxes";
+    if (r.project) params.set("p", r.project);
   } else if (r.view === "notifications") {
     path = "/notifications";
     if (r.tab !== "unread") params.set("tab", r.tab);
@@ -113,7 +120,7 @@ export function href(r: Route): string {
   } else if (r.view === "list") {
     if (r.tab !== "open") params.set("tab", r.tab);
     if (r.q) params.set("q", r.q);
-    if (r.who !== "everyone") params.set("who", r.who);
+    if (r.who !== "followed") params.set("who", r.who);
     if (r.project) params.set("p", r.project);
     if (r.list) params.set("l", r.list);
   }

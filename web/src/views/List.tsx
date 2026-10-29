@@ -7,7 +7,8 @@ import type { Scope, Who } from "../protocol";
 import { href } from "../route";
 import { Dot, Label, Time } from "./common";
 
-function Row({ f }: { f: Summary }) {
+/** One family in a list: its title, lists, state and evidence; "not fetched" while only a search's mail is known. */
+export function Row({ f }: { f: Summary }) {
   const why = evidenceLine(f.evidence);
   return (
     <li class="row">
@@ -21,6 +22,11 @@ function Row({ f }: { f: Summary }) {
             <Label text={l} kind="list" />
           ))}{" "}
           {f.unanswered && <Label text="unanswered" kind="flag" />}
+          {!f.fetched && (
+            <span class="label unfetched" title="Only what a search returned is here; opening the series fetches its thread">
+              not fetched
+            </span>
+          )}
         </div>
         <div class="row-meta">
           v{f.version} · {plural(f.patches, "patch", "patches")} · {f.state} · {f.sender} · last activity{" "}
@@ -71,7 +77,9 @@ const SORTS: Array<[string, string]> = [["", "Newest"], ["updated", "Recently up
 /** How many of a project's lists show before "more". */
 const LISTS_SHOWN = 8;
 
-export function List({ families: all, scope, projects, tab, q, who, project, list }: Props) {
+export function List({ families: all, scope, projects, tab, q, who: asked, project, list }: Props) {
+  // Following nothing yet, "followed" is everyone's.
+  const who = asked === "followed" && !scope.followed.length ? "everyone" : asked;
   const [query, setQuery] = useState(q);
   const [moreLists, setMoreLists] = useState(false);
   const mine = ofFamilies(all, whose(scope, who));
@@ -79,13 +87,13 @@ export function List({ families: all, scope, projects, tab, q, who, project, lis
   const lists = listsOf(inProject(mine, project));
   const search = (v: string) => {
     setQuery(v);
-    history.replaceState(null, "", href({ view: "list", tab, q: v, who, project, list }));
+    history.replaceState(null, "", href({ view: "list", tab, q: v, who: asked, project, list }));
   };
-  const here = (p?: string, l?: string) => href({ view: "list", tab, q: query, who, project: p, list: l });
+  const here = (p?: string, l?: string) => href({ view: "list", tab, q: query, who: asked, project: p, list: l });
   const shown = filterFamilies(families, tab, query);
   const open = families.filter(isOpen).length;
   const tabLink = (name: "open" | "closed", count: number, text: string) => (
-    <a class={`tab${tab === name ? " selected" : ""}`} href={href({ view: "list", tab: name, q: query, who, project, list })}>
+    <a class={`tab${tab === name ? " selected" : ""}`} href={href({ view: "list", tab: name, q: query, who: asked, project, list })}>
       <span class="shape">{name === "open" ? "○" : "✓"}</span> {count} {text}
     </a>
   );

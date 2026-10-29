@@ -25,7 +25,7 @@ use patchtrack_core::compose;
 use patchtrack_core::mail::{self, Head};
 use patchtrack_core::series::{self, Facts, Family, Series};
 use patchtrack_core::settings::{self, Follow, Settings, Subscription};
-use patchtrack_core::{Message, local, mbox, news, nudge, projects, thread, vdiff, views};
+use patchtrack_core::{Message, local, mbox, news, nudge, projects, sync, thread, vdiff, views};
 use patchtrack_store::{Draft, Export, Store};
 use serde_json::{Value, json};
 
@@ -208,6 +208,17 @@ impl Api {
                 ok(json!({"generation": self.generation()?, "sync": self.live.status(), "messages": d.messages.len(),
                     "unread": unread}))
             }
+            ("POST", "/v1/open") => {
+                let v = input()?;
+                ok(self.open_series(&field(&v, "root"), v["force"].as_bool().unwrap_or(false))?)
+            }
+            ("POST", "/v1/browse") => {
+                let v = input()?;
+                let before =
+                    v["before"].as_str().map(|t| series::parse_utc(t).ok_or("before: not a time")).transpose()?;
+                ok(self.browse(&field(&v, "project"), &field(&v, "inbox"), before)?)
+            }
+            ("GET", "/v1/inboxes") => ok(self.inboxes()?),
             ("POST", "/v1/sync") => {
                 self.live.ask();
                 ok(json!({"sync": self.live.status()}))
@@ -462,6 +473,105 @@ impl Api {
             people.retain(|p| !p.bot);
         }
         Ok(json!(people))
+    }
+
+    /// A series is opened: fetch its thread, if it never was, or longer ago
+    /// than `stale_minutes` (0: only when forced), or when `force`d (the
+    /// app's Refresh). One request, made by the server's own jobs, so as
+    /// politely as a sync; the app sees the thread arrive as a change.
+    fn open_series(&self, root: &str, force: bool) -> Result<Value> {
+        let d = self.derived()?;
+        let s = d.series.get(root).ok_or_else(|| Fail(404, format!("no series <{root}>")))?;
+        let age = s.as_of.as_deref().and_then(series::parse_utc).map(|t| now_secs() - t);
+        let stale = match age {
+            None => d.settings.stale_minutes > 0 || force,
+            Some(age) => d.settings.stale_minutes > 0 && age > d.settings.stale_minutes * 60,
+        };
+        if !(force || stale) {
+            return Ok(json!({"fetching": false, "as_of": s.as_of}));
+        }
+        if !s.pending {
+            // Where it was found, or last fetched from: "" is the archive setting's.
+            let archive = d
+                .facts
+                .thread_archive
+                .get(root)
+                .or_else(|| d.facts.archives.get(root).and_then(|a| a.iter().next()))
+                .cloned()
+                .unwrap_or_default();
+            let want = sync::Effect::WantThread { root: root.into(), at: mail::utc(now_secs()), archive };
+            Store::open(&self.db)?.apply(&want)?;
+        }
+        self.live.ask_threads();
+        Ok(json!({"fetching": true, "as_of": s.as_of}))
+    }
+
+    /// The archive key ("" for the archive setting's) of a project, by name;
+    /// "" for none.
+    fn archive_key(settings: &Settings, project: &str) -> Result<String> {
+        if project.is_empty() {
+            return Ok(String::new());
+        }
+        let p = crate::project(settings, project)?;
+        Ok(if p.archive == settings.archive { String::new() } else { p.archive.clone() })
+    }
+
+    /// List a page of an inbox's series, as lore's own pages do: its latest
+    /// since it was last listed, or what came before `before`. One search,
+    /// and no thread fetched.
+    fn browse(&self, project: &str, inbox: &str, before: Option<i64>) -> Result<Value> {
+        let settings = self.derived()?.settings.clone();
+        let inbox = settings::inbox(inbox)?;
+        let archive = Self::archive_key(&settings, project)?;
+        self.live.browse(Job::Browse { archive, inbox, until: before });
+        Ok(json!({"sync": self.live.status()}))
+    }
+
+    /// The inboxes there is something to browse in: your projects' lists and
+    /// every list a series in the store was found on, with how many series
+    /// each has here, and when it was last listed.
+    fn inboxes(&self) -> Result<Value> {
+        let d = self.derived()?;
+        let last = Store::open(&self.db)?.last_syncs()?;
+        let mut out: BTreeMap<(String, String), (Option<String>, usize)> = BTreeMap::new();
+        for p in &d.settings.projects {
+            for l in &p.lists {
+                out.entry((p.name.clone(), l.clone())).or_default();
+            }
+        }
+        for f in &d.families {
+            let s = f.head();
+            let named = projects::of(s, &d.facts, &d.settings.projects, &d.settings.archive);
+            let project = named.first().map_or(String::new(), |p| p.to_string());
+            for l in s.lists.iter().filter(|l| *l != "all") {
+                out.entry((project.clone(), l.clone())).or_default().1 += 1;
+            }
+        }
+        for (sub, at) in &last {
+            if sub.kind == Follow::Query && sub.value == BROWSE_QUERY {
+                let project = d
+                    .settings
+                    .projects
+                    .iter()
+                    .find(|p| {
+                        d.settings.own(Subscription { archive: p.archive.clone(), ..sub.clone() }).archive
+                            == sub.archive
+                    })
+                    .map_or(String::new(), |p| p.name.clone());
+                let e = out.entry((project, sub.list.clone())).or_default();
+                if e.0.as_ref().is_none_or(|t| t < at) {
+                    e.0 = Some(at.clone());
+                }
+            }
+        }
+        let store = Store::open(&self.db)?;
+        let mut rows = vec![];
+        for ((project, inbox), (listed, series)) in out {
+            let archive = Self::archive_key(&d.settings, &project).unwrap_or_default();
+            let since = store.machine(&oldest_key(&archive, &inbox))?;
+            rows.push(json!({"project": project, "inbox": inbox, "listed": listed, "since": since, "series": series}));
+        }
+        Ok(json!(rows))
     }
 
     /// One family, all of it, with each version's archive and its page there.
@@ -733,6 +843,9 @@ const ROUTES: &[&str] = &[
     "/v1/hello",
     "/v1/status",
     "/v1/sync",
+    "/v1/open",
+    "/v1/browse",
+    "/v1/inboxes",
     "/v1/summaries",
     "/v1/scope",
     "/v1/people",
@@ -776,8 +889,42 @@ fn archive_of<'a>(s: &Series, d: &'a Derived) -> &'a str {
 /// Lines of a sync's log kept for the app.
 const LOG_LINES: usize = 200;
 
-/// The server's own syncs: one at a time, when it starts, every
-/// `sync_every` minutes, and whenever it is asked.
+/// What browsing an inbox searches for: its patches, and replies to them.
+pub const BROWSE_QUERY: &str = "s:PATCH";
+
+/// How far back one page of an inbox goes, in days.
+pub const BROWSE_DAYS: i64 = 2;
+
+/// Where the store keeps how far back an inbox was listed.
+fn oldest_key(archive: &str, inbox: &str) -> String {
+    format!("browsed-since {archive} {inbox}")
+}
+
+/// What the server's own syncs do, one at a time.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Job {
+    /// Everything you follow, as `patchtrack sync` does.
+    Sync,
+    /// The threads asked for since (opened in the app): one request each.
+    Threads,
+    /// One page of an inbox's latest series, with no thread fetched: up to
+    /// `until` (epoch seconds), or the latest since it was last browsed.
+    Browse { archive: String, inbox: String, until: Option<i64> },
+}
+
+impl Job {
+    fn describe(&self) -> String {
+        match self {
+            Job::Sync => "Syncing".into(),
+            Job::Threads => "Fetching threads".into(),
+            Job::Browse { inbox, until: None, .. } => format!("Listing the latest on {inbox}"),
+            Job::Browse { inbox, .. } => format!("Listing older series on {inbox}"),
+        }
+    }
+}
+
+/// The server's own syncs: one job at a time; a sync when it starts, every
+/// `sync_every` minutes and when asked, threads and inbox pages when asked.
 #[derive(Default)]
 pub struct Live {
     state: Mutex<LiveState>,
@@ -786,12 +933,16 @@ pub struct Live {
 
 #[derive(Default)]
 struct LiveState {
-    /// A sync is wanted as soon as the one running (if any) is done.
+    /// A sync is wanted as soon as the job running (if any) is done.
     asked: bool,
-    running: bool,
+    /// Threads were asked for.
+    threads: bool,
+    browse: VecDeque<Job>,
+    /// What runs now.
+    doing: Option<Job>,
+    /// When the last sync started and finished, and whether nothing failed.
     started: Option<String>,
     finished: Option<String>,
-    /// Whether the last sync finished with nothing failed.
     ok: Option<bool>,
     log: VecDeque<String>,
 }
@@ -803,10 +954,31 @@ impl Live {
         self.wake.notify_all();
     }
 
+    /// Fetch the threads that are wanted, as soon as possible.
+    pub fn ask_threads(&self) {
+        self.state.lock().unwrap_or_else(|e| e.into_inner()).threads = true;
+        self.wake.notify_all();
+    }
+
+    /// List a page of an inbox, unless the same page is waiting already.
+    fn browse(&self, job: Job) {
+        let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !s.browse.contains(&job) && s.doing.as_ref() != Some(&job) {
+            s.browse.push_back(job);
+        }
+        self.wake.notify_all();
+    }
+
     pub fn status(&self) -> Value {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        json!({"running": s.running, "asked": s.asked, "started": s.started, "finished": s.finished, "ok": s.ok,
-            "log": s.log})
+        let inbox = |j: &Job| match j {
+            Job::Browse { inbox, .. } => Some(inbox.clone()),
+            _ => None,
+        };
+        let browsing: Vec<String> = s.doing.iter().chain(&s.browse).filter_map(inbox).collect();
+        json!({"running": s.doing == Some(Job::Sync), "asked": s.asked, "doing": s.doing.as_ref().map(Job::describe),
+            "threads": s.threads || s.doing == Some(Job::Threads), "browsing": browsing,
+            "started": s.started, "finished": s.finished, "ok": s.ok, "log": s.log})
     }
 
     fn say(&self, line: String) {
@@ -817,21 +989,33 @@ impl Live {
         s.log.push_back(line);
     }
 
-    /// Sync the store at `db` until the process ends: now, then on schedule
-    /// and when asked.
+    /// How often to sync, from the settings now.
+    fn every(db: &Path) -> i64 {
+        Store::open(db).ok().and_then(|st| Settings::load(st.settings().ok()?).ok()).map_or(30, |(s, _)| s.sync_every)
+    }
+
+    /// Run the store's jobs at `db` until the process ends: a sync now, then
+    /// on schedule, and whatever is asked for.
     pub fn run(&self, db: &Path) -> ! {
         self.ask();
         let mut next = Instant::now();
         loop {
-            {
+            let job = {
                 let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-                while !s.asked {
-                    let every = Store::open(db)
-                        .ok()
-                        .and_then(|st| Settings::load(st.settings().ok()?).ok())
-                        .map_or(30, |(settings, _)| settings.sync_every);
-                    if every > 0 && Instant::now() >= next {
-                        break;
+                loop {
+                    let every = Self::every(db);
+                    if s.asked || (every > 0 && Instant::now() >= next) {
+                        s.asked = false;
+                        s.started = Some(mail::utc(now_secs()));
+                        s.log.clear();
+                        break Job::Sync;
+                    }
+                    if s.threads {
+                        s.threads = false;
+                        break Job::Threads;
+                    }
+                    if let Some(job) = s.browse.pop_front() {
+                        break job;
                     }
                     // Settings may change meanwhile: look again within a minute.
                     let wait = if every > 0 { next.saturating_duration_since(Instant::now()) } else { Duration::MAX };
@@ -841,40 +1025,84 @@ impl Live {
                         .unwrap_or_else(|e| e.into_inner())
                         .0;
                 }
-                s.asked = false;
-                s.running = true;
-                s.started = Some(mail::utc(now_secs()));
-                s.log.clear();
-            }
-            let ok = match self.sync_once(db) {
+            };
+            self.state.lock().unwrap_or_else(|e| e.into_inner()).doing = Some(job.clone());
+            let ok = match self.run_job(db, &job) {
                 Ok(ok) => ok,
                 Err(e) => {
-                    self.say(format!("sync failed: {e}"));
+                    self.say(format!("{}: {e}", job.describe()));
                     false
                 }
             };
-            let every = Store::open(db)
-                .ok()
-                .and_then(|st| Settings::load(st.settings().ok()?).ok())
-                .map_or(30, |(settings, _)| settings.sync_every);
-            next = Instant::now() + Duration::from_secs(u64::try_from(every.max(1)).unwrap_or(1) * 60);
             let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            s.running = false;
-            s.finished = Some(mail::utc(now_secs()));
-            s.ok = Some(ok);
+            s.doing = None;
+            if job == Job::Sync {
+                next = Instant::now() + Duration::from_secs(u64::try_from(Self::every(db).max(1)).unwrap_or(1) * 60);
+                s.finished = Some(mail::utc(now_secs()));
+                s.ok = Some(ok);
+            }
         }
     }
 
-    fn sync_once(&self, db: &Path) -> std::result::Result<bool, Box<dyn std::error::Error>> {
+    fn run_job(&self, db: &Path, job: &Job) -> std::result::Result<bool, Box<dyn std::error::Error>> {
         let mut store = Store::open(db)?;
         let (settings, _) = Settings::load(store.settings()?)?;
-        let subs = store.subscriptions()?;
-        if subs.is_empty() && store.sources()?.is_empty() {
-            self.say("Nothing to sync: follow an author, a list, a search or a thread.".into());
-            return Ok(true);
+        let agent = crate::http_agent();
+        let now = now_secs();
+        match job {
+            Job::Sync => {
+                let subs = store.subscriptions()?;
+                if subs.is_empty() && store.sources()?.is_empty() {
+                    self.say("Nothing to sync: follow an author, a list, a search or a thread.".into());
+                    return Ok(true);
+                }
+                let args = crate::SyncArgs::default();
+                crate::sync_store(&mut store, &settings, &args, subs, &mut |line| self.say(line))
+            }
+            Job::Threads => {
+                // Each archive that is owed a thread, the archive setting's first.
+                let facts = store.facts()?;
+                let mut keys: Vec<String> =
+                    facts.pending.iter().map(|r| facts.thread_archive.get(r).cloned().unwrap_or_default()).collect();
+                keys.sort();
+                keys.dedup();
+                let mut ok = true;
+                for key in keys {
+                    let mut plan = settings.plan(vec![], now)?;
+                    plan.archive = settings.archive_of(&key).to_string();
+                    plan.archive_key = key;
+                    ok &= crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))?;
+                }
+                Ok(ok)
+            }
+            Job::Browse { archive, inbox, until } => {
+                let sub = Subscription {
+                    kind: Follow::Query,
+                    value: BROWSE_QUERY.into(),
+                    list: inbox.clone(),
+                    archive: archive.clone(),
+                };
+                let mut plan = settings.plan(vec![sub], now)?;
+                plan.archive = settings.archive_of(archive).to_string();
+                plan.archive_key = archive.clone();
+                // A page: no thread is fetched until one is opened.
+                plan.wide_threads = false;
+                plan.first_since_wide = now - BROWSE_DAYS * 86_400;
+                if let Some(until) = until {
+                    plan.since = Some(until - BROWSE_DAYS * 86_400);
+                    plan.until = Some(*until);
+                }
+                let since = until.unwrap_or(now) - BROWSE_DAYS * 86_400;
+                let ok = crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))?;
+                // How far back this inbox is listed: where "Load older" goes on from.
+                let key = oldest_key(archive, inbox);
+                let before = store.machine(&key)?.as_deref().and_then(series::parse_utc);
+                if ok && before.is_none_or(|b| since < b) {
+                    store.set_machine(&key, &mail::utc(since))?;
+                }
+                Ok(ok)
+            }
         }
-        let args = crate::SyncArgs::default();
-        crate::sync_store(&mut store, &settings, &args, subs, &mut |line| self.say(line))
     }
 }
 
@@ -989,6 +1217,60 @@ mod tests {
         let reply = reply.replace("<r2@z>", "<r3@z>");
         api.handle("POST", "/v1/import", reply.as_bytes());
         assert_eq!(get(&api, "/v1/status")["unread"], 0);
+    }
+
+    #[test]
+    fn opening_a_series_fetches_its_thread_when_stale() {
+        let api = api("open");
+        api.handle("POST", "/v1/import", MBOX.as_bytes());
+        // Never fetched (only imported): opening it asks for its thread.
+        let (status, v) = post(&api, "/v1/open", json!({"root": "p1@x"}));
+        assert_eq!((status, &v["fetching"]), (200, &json!(true)), "{v}");
+        assert_eq!(get(&api, "/v1/status")["sync"]["threads"], true);
+        assert!(Store::open(&api.db).unwrap().facts().unwrap().pending.contains("p1@x"));
+        let fetched = |at: &str| {
+            let e = sync::Effect::Fetched { root: "p1@x".into(), at: at.into(), archive: String::new() };
+            Store::open(&api.db).unwrap().apply(&e).unwrap();
+        };
+        // Fetched a minute ago: fresh, unless you ask.
+        fetched(&mail::utc(now_secs() - 60));
+        assert_eq!(post(&api, "/v1/open", json!({"root": "p1@x"})).1["fetching"], false);
+        assert_eq!(post(&api, "/v1/open", json!({"root": "p1@x", "force": true})).1["fetching"], true);
+        // An hour ago: older than stale_minutes (30).
+        fetched(&mail::utc(now_secs() - 3600));
+        assert_eq!(post(&api, "/v1/open", json!({"root": "p1@x"})).1["fetching"], true);
+        // 0: only when you ask.
+        post(&api, "/v1/settings", json!({"key": "stale_minutes", "value": "0"}));
+        fetched(&mail::utc(now_secs() - 3600));
+        assert_eq!(post(&api, "/v1/open", json!({"root": "p1@x"})).1["fetching"], false);
+        assert_eq!(post(&api, "/v1/open", json!({"root": "nope@x"})).0, 404);
+    }
+
+    #[test]
+    fn an_inbox_is_listed_by_page() {
+        let api = api("browse");
+        post(
+            &api,
+            "/v1/settings",
+            json!({"key": "projects", "value": r#"[{"name": "Linux", "archive": "https://lore.kernel.org", "lists": ["linux-usb"]}]"#}),
+        );
+        let inboxes = get(&api, "/v1/inboxes");
+        assert_eq!((&inboxes[0]["project"], &inboxes[0]["inbox"]), (&json!("Linux"), &json!("linux-usb")), "{inboxes}");
+        let (status, v) = post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb"}));
+        assert_eq!(status, 200, "{v}");
+        assert_eq!(get(&api, "/v1/status")["sync"]["browsing"], json!(["linux-usb"]));
+        // The same page asked twice waits once; an older page is another.
+        post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb"}));
+        post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb", "before": "2026-10-20T00:00:00Z"}));
+        assert_eq!(get(&api, "/v1/status")["sync"]["browsing"], json!(["linux-usb", "linux-usb"]));
+        assert_eq!(post(&api, "/v1/browse", json!({"project": "Nope", "inbox": "linux-usb"})).0, 400);
+        // How far back an inbox was listed, as a page's job records it, is where "Load older" goes on from.
+        Store::open(&api.db).unwrap().set_machine(&oldest_key("", "linux-usb"), "2026-10-20T00:00:00Z").unwrap();
+        post(&api, "/v1/settings", json!({"key": "projects", "value": "[]"}));
+        let inboxes = get(&api, "/v1/inboxes");
+        let row = inboxes.as_array().unwrap().iter().find(|i| i["inbox"] == "linux-usb").cloned();
+        assert_eq!(row.map(|r| r["since"].clone()), None, "only inboxes a project names or series are on: {inboxes}");
+        assert_eq!(post(&api, "/v1/browse", json!({"inbox": "a b/c"})).0, 400);
     }
 
     #[test]

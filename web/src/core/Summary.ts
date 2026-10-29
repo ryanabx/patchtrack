@@ -26,7 +26,16 @@ title: string, version: number, patches: number, lists: Array<string>, unanswere
 /**
  * Replies to the latest version from people (not bots, not its sender).
  */
-replies: number, last_activity: string, 
+replies: number, 
+/**
+ * When the latest version was posted.
+ */
+posted: string, last_activity: string, 
+/**
+ * Whether the latest version's thread was ever read whole, from the
+ * archive or your mailbox: if not, only what a search returned is known.
+ */
+fetched: boolean, 
 /**
  * The projects it is in (see `projects::of`); filled by who knows them.
  */
