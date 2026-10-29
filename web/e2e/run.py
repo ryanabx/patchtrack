@@ -17,6 +17,7 @@ Exits non-zero if anything failed.
 """
 import argparse
 import http.server
+import json
 import os
 import re
 import shutil
@@ -58,10 +59,19 @@ def mbox(mails):
     return "".join(f"From mboxrd@z Thu Jan  1 00:00:00 1970\n{m}\n" for m in mails)
 
 
+_ports = set()
+
+
 def free_port():
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
+    """A port nothing listens on, and not one handed out before: the ports are
+    found before anything binds them, so two could otherwise be the same."""
+    while True:
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        if port not in _ports:
+            _ports.add(port)
+            return port
 
 
 class Quiet(http.server.SimpleHTTPRequestHandler):
@@ -101,6 +111,17 @@ class Archive(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         Archive.seen.append(("GET", self.path, self.headers.get("User-Agent", "")))
+        if self.path == "/manifest.js.gz":
+            # As lore lists its inboxes: each epoch a repository, with when it changed.
+            body = json.dumps({"/netdev/git/0.git": {"modified": 1792000000, "description": "Networking"},
+                               "/linux-usb/git/0.git": {"modified": 1791000000, "description": "Linux USB"},
+                               "/linux-usb/git/1.git": {"modified": 1793000000, "description": "Linux USB"}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         root = self.path.split("/")[2]
         self.answer([m for m in MAILS + STRANGER if root in m])
 
@@ -352,17 +373,23 @@ def main():
         m.go(app + "#/notifications")
         caught = m.wait("return document.querySelector('.blankslate h2')?.textContent")
         check("notifications start from what is here", caught == "All caught up", caught)
+        # A review of your series, and a reply on someone else's: only yours is a notification.
         with open(os.path.join(site, "data", "review.mbox"), "w") as f:
-            f.write(mbox(["Message-ID: <pubrev@x>\nFrom: Rev <rev@x>\nSubject: Re: [PATCH] bar: a published series\n"
+            f.write(mbox(["Message-ID: <bazrev@x>\nFrom: Rev <rev@x>\nSubject: Re: [PATCH] baz: mine too\n"
+                          "In-Reply-To: <baz@x>\nReferences: <baz@x>\nDate: Wed, 07 Oct 2026 10:00:00 +0000\n\n"
+                          "Reviewed-by: Rev <rev@x>\n",
+                          "Message-ID: <pubrev@x>\nFrom: Rev <rev@x>\nSubject: Re: [PATCH] bar: a published series\n"
                           "In-Reply-To: <pub@x>\nReferences: <pub@x>\nDate: Wed, 07 Oct 2026 10:00:00 +0000\n\n"
-                          "Reviewed-by: Rev <rev@x>\n"]))
+                          "Looks fine to me.\n"]))
         m.go(app + "#/add")
         m.wait("return !!document.querySelector('.drop')")
         drop(m, "data/review.mbox", "review.mbox")
         m.wait("return document.querySelector('.results li')?.textContent.includes('new')")
         m.js("location.hash = '/notifications'; return 1")
         lines = m.wait("return [...document.querySelectorAll('.notification .news-lines li')].map(e => e.textContent).join('|')")
-        check("then a new review is a notification", lines and "Rev Reviewed-By" in lines and "→ reviewed" in lines, lines)
+        check("then a new review of your series is a notification", lines and "Rev Reviewed-By" in lines and "→ reviewed" in lines, lines)
+        titles = m.js("return [...document.querySelectorAll('.notification .row-title')].map(e => e.textContent).join('|')")
+        check("and a reply on someone else's is not", titles and "baz: mine too" in titles and "bar: a published" not in titles, titles)
         badge = m.wait("return document.querySelector('.unread-count')?.textContent")
         check("counted in the bar", badge == "1", badge)
         m.js("document.querySelector('.notification .mark-read').click(); return 1")
@@ -370,16 +397,16 @@ def main():
                       "!document.querySelector('.unread-count')")
         check("marked as read, it goes, and so does the count", read)
         said = cli("news", "--peek", "--everyone").stdout
-        check("read in the bridge's store, as `news` sees it", said.strip() == "Nothing new.", said)
+        check("read in the bridge's store, as `news` sees it", "baz: mine too" not in said, said)
         with open(os.path.join(site, "data", "review2.mbox"), "w") as f:
-            f.write(mbox(["Message-ID: <pubrev2@x>\nFrom: Ann <ann@x>\nSubject: Re: [PATCH] bar: a published series\n"
-                          "In-Reply-To: <pub@x>\nReferences: <pub@x>\nDate: Thu, 08 Oct 2026 10:00:00 +0000\n\nWhy?\n"]))
+            f.write(mbox(["Message-ID: <bazrev2@x>\nFrom: Ann <ann@x>\nSubject: Re: [PATCH] baz: mine too\n"
+                          "In-Reply-To: <baz@x>\nReferences: <baz@x>\nDate: Thu, 08 Oct 2026 10:00:00 +0000\n\nWhy?\n"]))
         m.go(app + "#/add")
         m.wait("return !!document.querySelector('.drop')")
         drop(m, "data/review2.mbox", "review2.mbox")
         m.wait("return document.querySelector('.results li')?.textContent.includes('new')")
         badge = m.wait("return document.querySelector('.unread-count')?.textContent", 15)
-        open_family(m, "bar: a published")
+        open_family(m, "baz: mine too")
         gone = m.wait("return !!document.querySelector('.msg') && !document.querySelector('.unread-count')", 15)
         m.js("location.hash = '/notifications'; return 1")
         caught = m.wait("return document.querySelector('.blankslate h2')?.textContent")
@@ -399,16 +426,23 @@ def main():
                        "document.querySelector('#setting-name .status').textContent")
         check("a setting is saved", saved and saved.startswith("Saved."), saved)
         check("in the bridge's store", "Me Myself" in cli("settings").stdout)
+        cats = m.js("return [...document.querySelectorAll('.settings-nav a')].map(a => a.textContent).join('|')")
+        check("settings come one category at a time, chosen on the left", cats and cats.startswith("You|Projects|Syncing")
+              and not m.js("return !!document.querySelector('#setting-window_days')"), cats)
+        m.js("document.querySelector('.settings-nav a[data-category=\"syncing\"]').click(); return 1")
+        m.wait("return !!document.querySelector('#setting-window_days input') && location.hash.includes('c=syncing')")
         m.js("""const i = document.querySelector('#setting-window_days input'); i.value = '0';
                 i.dispatchEvent(new Event('input', {bubbles: true})); return 1""")
         time.sleep(0.3)
         m.js("document.querySelector('#setting-window_days input').dispatchEvent(new Event('blur')); return 1")
         err = m.wait("return document.querySelector('#setting-window_days p.error')?.textContent")
         check("a bad value is refused, as the CLI refuses it", err and "more than 0" in err, err)
+        check("sync_every has a control", m.js("return document.querySelector('#setting-sync_every input')?.type") == "number")
+        m.js("document.querySelector('.settings-nav a[data-category=\"projects\"]').click(); return 1")
+        m.wait("return !!document.querySelector('#setting-projects .presets button')")
         m.js("[...document.querySelectorAll('#setting-projects .presets button')].find(b => b.textContent === 'GCC').click(); return 1")
         card = m.wait("return document.querySelector('#setting-projects .card[data-project=\"GCC\"]')?.textContent")
         check("a built-in project is added", card and "gcc-patches" in card, card)
-        check("sync_every has a control", m.js("return document.querySelector('#setting-sync_every input')?.type") == "number")
         m.go(app + "#/?who=everyone")
         tabs = m.wait("return [...document.querySelectorAll('.projects .project')].map(a => a.textContent).join('|')")
         check("the list has its projects", tabs and "All projects" in tabs and "GCC" in tabs, tabs)
@@ -417,8 +451,9 @@ def main():
         rows = m.wait("return document.querySelector('input.search').value === 'state:reviewed' && "
                       "[...document.querySelectorAll('.row')].map(r => r.querySelector('.row-meta').textContent).join('|')")
         check("the State menu filters by a qualifier in the search", rows and all("reviewed" in r for r in rows.split("|")), rows)
-        count = m.js("return [...document.querySelectorAll('.row')].find(r => r.textContent.includes('bar: a published'))?.querySelector('.row-count')?.textContent.trim()")
-        check("a row counts the replies from people", count == "2", count)
+        m.go(app + "#/?who=everyone")
+        count = m.wait("return [...document.querySelectorAll('.row')].find(r => r.textContent.includes('bar: a published'))?.querySelector('.row-count')?.textContent.trim()")
+        check("a row counts the replies from people", count == "1", count)
 
         # With identities, the list narrows to your series ("sent or wrote"), and People to who replied to them.
         m.go(app + "#/?who=mine")
@@ -535,6 +570,20 @@ def main():
                 break
             time.sleep(0.1)
         check("Sync now syncs", len(Archive.seen) > before, Archive.seen[before:])
+
+        # The inboxes, as the archive lists them, newest first; "all" is not one to list.
+        m.go(app + "#/inboxes")
+        names = m.wait("return [...document.querySelectorAll('.inbox-list li a')].map(a => a.textContent).join('|').includes('netdev') && "
+                       "[...document.querySelectorAll('.inbox-list li a')].map(a => a.textContent).join('|')", 30)
+        check("the inboxes come from the archive's list, newest first", names and names.index("linux-usb") < names.index("netdev"), names)
+        manifests = [a for a in Archive.seen if a[1] == "/manifest.js.gz"]
+        m.go(app + "#/inboxes/all")
+        said = m.wait("return document.querySelector('.inbox-main p.error')?.textContent")
+        check("all is refused, with why, and nothing is listed",
+              said and "every inbox" in said and not m.js("return document.querySelector('.inbox-head')?.textContent.includes('Listing')"), said)
+        m.go(app + "#/inboxes")
+        m.wait("return !!document.querySelector('.inbox-list li a')")
+        check("the archive's list is read once an hour, not on every visit", len([a for a in Archive.seen if a[1] == "/manifest.js.gz"]) == len(manifests) == 1, manifests)
 
         # An inbox, browsed: one search lists its series, and no thread is fetched
         # until one is opened, which fetches it.

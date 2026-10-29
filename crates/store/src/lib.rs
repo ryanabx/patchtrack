@@ -17,12 +17,12 @@
 use std::fmt;
 use std::path::Path;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use patchtrack_core::mail::{Addr, Message, PARSER_VERSION};
 use patchtrack_core::series::{Facts, Role, TreeRow};
 use patchtrack_core::settings::{Follow, Subscription};
-use patchtrack_core::sync::Effect;
+use patchtrack_core::sync::{Effect, InboxInfo};
 use patchtrack_core::trees::Tree;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -199,7 +199,25 @@ const MIGRATIONS: &[&str] = &[
     INSERT INTO root_lists_7 SELECT root, list, '' FROM root_lists;
     DROP TABLE root_lists;
     ALTER TABLE root_lists_7 RENAME TO root_lists;",
+    // 8: the inboxes each archive lists (its manifest.js.gz), and when that
+    // was read. Facts of the archive, not of you: exports carry them. Empty
+    // until the bridge first reads an archive's list.
+    "CREATE TABLE archive_inboxes (
+        archive      TEXT NOT NULL,    -- '' for the archive setting's
+        name         TEXT NOT NULL,
+        description  TEXT NOT NULL,
+        updated      TEXT,             -- when it last changed, if the archive says
+        PRIMARY KEY (archive, name)
+    );
+    CREATE TABLE archive_lists_read (
+        archive      TEXT PRIMARY KEY,
+        read_at      TEXT NOT NULL
+    );",
 ];
+
+/// (archive key, inbox) for each inbox the archives list, and when each
+/// archive's list was read (by archive key).
+pub type ArchiveInboxes = (Vec<(String, InboxInfo)>, HashMap<String, String>);
 
 /// Mail you composed (see `patchtrack_core::compose`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -328,6 +346,24 @@ impl Store {
         Ok(())
     }
 
+    /// The inboxes each archive lists (by archive key, "" for the archive
+    /// setting's), and when each archive's list was last read.
+    pub fn archive_inboxes(&self) -> Result<ArchiveInboxes> {
+        let inboxes = self
+            .db
+            .prepare("SELECT archive, name, description, updated FROM archive_inboxes")?
+            .query_map([], |r| {
+                Ok((r.get(0)?, InboxInfo { name: r.get(1)?, description: r.get(2)?, updated: r.get(3)? }))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let read = self
+            .db
+            .prepare("SELECT archive, read_at FROM archive_lists_read")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok((inboxes, read))
+    }
+
     /// A number that changes whenever another connection, of this process
     /// or another, commits to the store: what a server watches to know its
     /// answers are stale.
@@ -433,6 +469,22 @@ impl Store {
                          archive = excluded.archive",
                     params![root, at, archive],
                 )?;
+            }
+            Effect::Inboxes { archive, at, inboxes } => {
+                let tx = self.db.transaction()?;
+                tx.execute("DELETE FROM archive_inboxes WHERE archive = ?1", [archive])?;
+                for i in inboxes {
+                    tx.execute(
+                        "INSERT INTO archive_inboxes (archive, name, description, updated) VALUES (?1, ?2, ?3, ?4)",
+                        params![archive, i.name, i.description, i.updated],
+                    )?;
+                }
+                tx.execute(
+                    "INSERT INTO archive_lists_read (archive, read_at) VALUES (?1, ?2)
+                     ON CONFLICT (archive) DO UPDATE SET read_at = excluded.read_at",
+                    [archive, at],
+                )?;
+                tx.commit()?;
             }
             Effect::Fetch(_) | Effect::Log(_) => {}
         }
@@ -963,6 +1015,25 @@ mod tests {
         first.add(&mail("b@x", "Dev <dev@x>", "Fix.\n")).unwrap();
         assert_ne!(watch.data_version().unwrap(), before, "a change went unseen");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn an_archives_inboxes_are_replaced_by_its_next_list() {
+        let mut s = Store::open_in_memory().unwrap();
+        let inbox = |name: &str| InboxInfo { name: name.into(), description: String::new(), updated: None };
+        let list = |archive: &str, at: &str, names: &[&str]| Effect::Inboxes {
+            archive: archive.into(),
+            at: at.into(),
+            inboxes: names.iter().map(|n| inbox(n)).collect(),
+        };
+        s.apply(&list("", "2026-10-01T00:00:00Z", &["a", "b"])).unwrap();
+        s.apply(&list("https://other.example", "2026-10-01T00:00:00Z", &["c"])).unwrap();
+        s.apply(&list("", "2026-10-02T00:00:00Z", &["b", "d"])).unwrap();
+        let (mut inboxes, read) = s.archive_inboxes().unwrap();
+        inboxes.sort_by(|a, b| (&a.0, &a.1.name).cmp(&(&b.0, &b.1.name)));
+        let names: Vec<(&str, &str)> = inboxes.iter().map(|(a, i)| (a.as_str(), i.name.as_str())).collect();
+        assert_eq!(names, [("", "b"), ("", "d"), ("https://other.example", "c")]);
+        assert_eq!(read[""], "2026-10-02T00:00:00Z");
     }
 
     #[test]

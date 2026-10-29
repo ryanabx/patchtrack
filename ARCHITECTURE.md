@@ -122,7 +122,7 @@ needs 1.98.
 - **Raw facts and your decisions, nothing derived.** Messages; when each
   thread was fetched and from where; tree check results; subscriptions;
   and what only you can say: closed families, what you last read
-  (`seen`), drafts. Series, families and states are recomputed on every
+  (`seen`), drafts; and the inboxes each archive lists. Series, families and states are recomputed on every
   read, so a better heuristic applies to old data without a refetch.
 - **Each message's raw bytes**, plus the header columns queries need.
   Re-parsing with a better parser needs no refetch, an exported message
@@ -221,9 +221,11 @@ HTTPS proxy, serving the built app too) are one server:
   (`s:PATCH`) per page of two days and no thread fetched. A thread is
   fetched when its series is opened and was never fetched or is older
   than `stale_minutes` (30), or on Refresh; a series never fetched whole
-  says so. Syncs, the threads you open and inbox pages are jobs of one
-  queue, run one at a time, each through `sync::Sync`, so as politely as
-  any sync.
+  says so. The inboxes to browse are the archive's own list (its
+  `manifest.js.gz`, read at most hourly), newest first, as lore's front
+  page shows them. Syncs, the threads you open, inbox pages and lists of
+  inboxes are jobs of one queue, run one at a time, each through
+  `sync::Sync`, so as politely as any sync.
 - **Who may ask**: requests naming another Host than 127.0.0.1, localhost
   or the names it was given are refused (DNS rebinding); CORS is
   answered for the app's origins only, never `*`; every API request

@@ -5,6 +5,7 @@
 import { useEffect, useState } from "preact/hooks";
 
 import type { Project, Setting } from "../protocol";
+import { href } from "../route";
 import type { Store } from "../store";
 
 type Save = (value: unknown) => Promise<void>;
@@ -301,7 +302,10 @@ function Control({ s, value, save, presets }: { s: Setting; value: unknown; save
 }
 
 /** The settings, a section at a time, each with its control. */
-export function Settings({ store, onChanged }: { store: Store; onChanged: () => void }) {
+/** A category's place in the address: its title, in lower case. */
+const slug = (title: string) => title.toLowerCase();
+
+export function Settings({ store, onChanged, category }: { store: Store; onChanged: () => void; category?: string }) {
   const [settings, setSettings] = useState<Setting[] | null>(null);
   const [presets, setPresets] = useState<Project[]>([]);
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -340,16 +344,26 @@ export function Settings({ store, onChanged }: { store: Store; onChanged: () => 
   ]);
   const other = settings.filter((s) => !named.has(s.key));
   if (other.length) groups.push(["Other", "", other]);
+  // One category at a time, chosen on the left, as GitHub's settings are.
+  const current = groups.find(([title]) => slug(title) === category) ?? groups[0];
   return (
     <div class="settings">
-      <h1>Settings</h1>
-      <p class="note">
-        Kept in the bridge's store: the command line on that machine reads the same ones (<code>patchtrack settings</code>), and
-        an exported store carries them (a public export does not).
-      </p>
-      {groups.map(([title, intro, list]) => (
-        <section class="settings-group">
-          <h2>{title}</h2>
+      <nav class="settings-nav" aria-label="Categories">
+        {groups.map(([title, , list]) => (
+          <a
+            class={title === current[0] ? "selected" : undefined}
+            href={href({ view: "settings", category: slug(title) })}
+            data-category={slug(title)}
+          >
+            {title}
+            {list.some((s) => errors[s.key]) && <span class="error"> !</span>}
+          </a>
+        ))}
+      </nav>
+      <div class="settings-main">
+      <h1>{current[0]}</h1>
+      {[current].map(([title, intro, list]) => (
+        <section class="settings-group" data-category={slug(title)}>
           {intro && <p class="note">{intro}</p>}
           {list.map((s) => {
             const value = JSON.parse(s.value ?? s.default);
@@ -372,6 +386,11 @@ export function Settings({ store, onChanged }: { store: Store; onChanged: () => 
           })}
         </section>
       ))}
+      <p class="note">
+        Kept in the bridge's store: the command line on that machine reads the same ones (<code>patchtrack settings</code>), and
+        an exported store carries them (a public export does not).
+      </p>
+      </div>
     </div>
   );
 }

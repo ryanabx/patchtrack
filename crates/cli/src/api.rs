@@ -219,6 +219,10 @@ impl Api {
                 ok(self.browse(&field(&v, "project"), &field(&v, "inbox"), before)?)
             }
             ("GET", "/v1/inboxes") => ok(self.inboxes()?),
+            ("POST", "/v1/inboxes/refresh") => {
+                let v = input()?;
+                ok(self.refresh_inboxes(v["force"].as_bool().unwrap_or(false))?)
+            }
             ("POST", "/v1/sync") => {
                 self.live.ask();
                 ok(json!({"sync": self.live.status()}))
@@ -522,56 +526,119 @@ impl Api {
     fn browse(&self, project: &str, inbox: &str, before: Option<i64>) -> Result<Value> {
         let settings = self.derived()?.settings.clone();
         let inbox = settings::inbox(inbox)?;
+        if inbox == "all" {
+            // Every inbox at once: a page of it is thousands of messages, many searches.
+            return Err(Fail(400, "\"all\" is every inbox at once, far too much to list: pick one inbox".into()));
+        }
         let archive = Self::archive_key(&settings, project)?;
         self.live.browse(Job::Browse { archive, inbox, until: before });
         Ok(json!({"sync": self.live.status()}))
     }
 
-    /// The inboxes there is something to browse in: your projects' lists and
-    /// every list a series in the store was found on, with how many series
-    /// each has here, and when it was last listed.
-    fn inboxes(&self) -> Result<Value> {
+    /// The archive key of a URL: "" for the archive setting's.
+    fn key_of(settings: &Settings, url: &str) -> String {
+        if url == settings.archive { String::new() } else { url.to_string() }
+    }
+
+    /// Read each archive's list of inboxes again when it is older than an hour
+    /// (or `force`): your projects' archives and the archive setting's.
+    fn refresh_inboxes(&self, force: bool) -> Result<Value> {
         let d = self.derived()?;
-        let last = Store::open(&self.db)?.last_syncs()?;
-        let mut out: BTreeMap<(String, String), (Option<String>, usize)> = BTreeMap::new();
-        for p in &d.settings.projects {
+        let (_, read) = Store::open(&self.db)?.archive_inboxes()?;
+        let mut asked = 0;
+        for url in d.settings.archives(&d.subs) {
+            let key = Self::key_of(&d.settings, url);
+            let fresh = read
+                .get(&key)
+                .and_then(|t| series::parse_utc(t))
+                .is_some_and(|t| now_secs() - t < INBOXES_MINUTES * 60);
+            if force || !fresh {
+                self.live.browse(Job::Inboxes { archive: key });
+                asked += 1;
+            }
+        }
+        Ok(json!({ "asked": asked }))
+    }
+
+    /// The inboxes there are to browse, newest first, as lore's front page
+    /// lists them: each archive's list (see `refresh_inboxes`), each inbox
+    /// under the project that names it, else the project that takes every
+    /// inbox of its archive; and every list a series here was found on. With
+    /// how many series each has here, when it was last listed, and how far
+    /// back.
+    fn inboxes(&self) -> Result<Value> {
+        #[derive(Default)]
+        struct Row {
+            description: String,
+            updated: Option<String>,
+            listed: Option<String>,
+            series: usize,
+        }
+        let d = self.derived()?;
+        let store = Store::open(&self.db)?;
+        let (listed_by_archive, _) = store.archive_inboxes()?;
+        let projects = &d.settings.projects;
+        let mut out: BTreeMap<(String, String), Row> = BTreeMap::new();
+        for p in projects.iter().filter(|p| !p.lists.is_empty()) {
             for l in &p.lists {
                 out.entry((p.name.clone(), l.clone())).or_default();
             }
         }
+        for (key, info) in &listed_by_archive {
+            let url = d.settings.archive_of(key);
+            let on_archive: Vec<_> = projects.iter().filter(|p| p.archive == url).collect();
+            let project = on_archive
+                .iter()
+                .find(|p| p.lists.contains(&info.name))
+                .or_else(|| on_archive.iter().find(|p| p.lists.is_empty()))
+                .map(|p| p.name.clone());
+            // An archive no project claims all of: its inboxes, if it is the archive setting's.
+            let project = match project {
+                Some(p) => p,
+                None if key.is_empty() && on_archive.iter().all(|p| !p.lists.is_empty()) => String::new(),
+                None => continue,
+            };
+            let row = out.entry((project, info.name.clone())).or_default();
+            row.description = info.description.clone();
+            row.updated = info.updated.clone();
+        }
         for f in &d.families {
             let s = f.head();
-            let named = projects::of(s, &d.facts, &d.settings.projects, &d.settings.archive);
+            let named = projects::of(s, &d.facts, projects, &d.settings.archive);
             let project = named.first().map_or(String::new(), |p| p.to_string());
             for l in s.lists.iter().filter(|l| *l != "all") {
-                out.entry((project.clone(), l.clone())).or_default().1 += 1;
+                out.entry((project.clone(), l.clone())).or_default().series += 1;
             }
         }
-        for (sub, at) in &last {
+        for (sub, at) in &store.last_syncs()? {
             if sub.kind == Follow::Query && sub.value == BROWSE_QUERY {
-                let project = d
-                    .settings
-                    .projects
+                let project = projects
                     .iter()
                     .find(|p| {
                         d.settings.own(Subscription { archive: p.archive.clone(), ..sub.clone() }).archive
                             == sub.archive
                     })
                     .map_or(String::new(), |p| p.name.clone());
-                let e = out.entry((project, sub.list.clone())).or_default();
-                if e.0.as_ref().is_none_or(|t| t < at) {
-                    e.0 = Some(at.clone());
+                let row = out.entry((project, sub.list.clone())).or_default();
+                if row.listed.as_ref().is_none_or(|t| t < at) {
+                    row.listed = Some(at.clone());
                 }
             }
         }
-        let store = Store::open(&self.db)?;
-        let mut rows = vec![];
-        for ((project, inbox), (listed, series)) in out {
+        let mut rows: Vec<((String, String), Row)> = out.into_iter().collect();
+        // Newest first, as the archive's front page; what it does not date, by what was listed here.
+        rows.sort_by(|(a, x), (b, y)| {
+            let when = |r: &Row| r.updated.clone().or_else(|| r.listed.clone());
+            when(y).cmp(&when(x)).then_with(|| a.cmp(b))
+        });
+        let mut json_rows = vec![];
+        for ((project, inbox), row) in rows {
             let archive = Self::archive_key(&d.settings, &project).unwrap_or_default();
             let since = store.machine(&oldest_key(&archive, &inbox))?;
-            rows.push(json!({"project": project, "inbox": inbox, "listed": listed, "since": since, "series": series}));
+            json_rows.push(json!({"project": project, "inbox": inbox, "description": row.description,
+                "updated": row.updated, "listed": row.listed, "since": since, "series": row.series}));
         }
-        Ok(json!(rows))
+        Ok(json!(json_rows))
     }
 
     /// One family, all of it, with each version's archive and its page there.
@@ -613,12 +680,16 @@ impl Api {
     }
 
     /// The open families that changed since you last read them, as `patchtrack
-    /// news` finds them; none before the first read, which `seen` records.
+    /// news` finds them, of those that notify you (`views::notifies`: they
+    /// involve you, or you follow their author or thread); none before the
+    /// first read, which `seen` records.
     fn unread<'a>(d: &'a Derived, seen: &HashMap<String, String>) -> Vec<news::Change<'a>> {
         if seen.is_empty() {
             return vec![];
         }
-        news::changes(d.families.iter().filter(|f| f.closed.is_none()), seen)
+        let ids = &d.settings.identities;
+        let notifies = |f: &&Family| f.versions.iter().any(|s| views::notifies(s, ids, &d.subs, &d.facts));
+        news::changes(d.families.iter().filter(|f| f.closed.is_none()).filter(notifies), seen)
     }
 
     /// GitHub's notifications, for mail: each open family that changed since
@@ -846,6 +917,7 @@ const ROUTES: &[&str] = &[
     "/v1/open",
     "/v1/browse",
     "/v1/inboxes",
+    "/v1/inboxes/refresh",
     "/v1/summaries",
     "/v1/scope",
     "/v1/people",
@@ -892,6 +964,9 @@ const LOG_LINES: usize = 200;
 /// What browsing an inbox searches for: its patches, and replies to them.
 pub const BROWSE_QUERY: &str = "s:PATCH";
 
+/// How old an archive's list of inboxes may get before it is read again, in minutes.
+pub const INBOXES_MINUTES: i64 = 60;
+
 /// How far back one page of an inbox goes, in days.
 pub const BROWSE_DAYS: i64 = 2;
 
@@ -910,6 +985,8 @@ enum Job {
     /// One page of an inbox's latest series, with no thread fetched: up to
     /// `until` (epoch seconds), or the latest since it was last browsed.
     Browse { archive: String, inbox: String, until: Option<i64> },
+    /// The archive's list of inboxes.
+    Inboxes { archive: String },
 }
 
 impl Job {
@@ -919,6 +996,7 @@ impl Job {
             Job::Threads => "Fetching threads".into(),
             Job::Browse { inbox, until: None, .. } => format!("Listing the latest on {inbox}"),
             Job::Browse { inbox, .. } => format!("Listing older series on {inbox}"),
+            Job::Inboxes { .. } => "Reading the list of inboxes".into(),
         }
     }
 }
@@ -978,6 +1056,7 @@ impl Live {
         let browsing: Vec<String> = s.doing.iter().chain(&s.browse).filter_map(inbox).collect();
         json!({"running": s.doing == Some(Job::Sync), "asked": s.asked, "doing": s.doing.as_ref().map(Job::describe),
             "threads": s.threads || s.doing == Some(Job::Threads), "browsing": browsing,
+            "inboxes": s.doing.iter().chain(&s.browse).any(|j| matches!(j, Job::Inboxes { .. })),
             "started": s.started, "finished": s.finished, "ok": s.ok, "log": s.log})
     }
 
@@ -1074,6 +1153,13 @@ impl Live {
                     ok &= crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))?;
                 }
                 Ok(ok)
+            }
+            Job::Inboxes { archive } => {
+                let mut plan = settings.plan(vec![], now)?;
+                plan.archive = settings.archive_of(archive).to_string();
+                plan.archive_key = archive.clone();
+                plan.inboxes = true;
+                crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))
             }
             Job::Browse { archive, inbox, until } => {
                 let sub = Subscription {
@@ -1191,6 +1277,8 @@ mod tests {
     fn notifications_are_read_one_at_a_time_or_all() {
         let api = api("notifications");
         api.handle("POST", "/v1/import", MBOX.as_bytes());
+        // Notifications are about what involves you: here, your own series.
+        post(&api, "/v1/settings", json!({"key": "identities", "value": "[\"dev@x.org\"]"}));
         let list = get(&api, "/v1/summaries");
         let (sender, key) = (list[0]["sender"].clone(), list[0]["key"].clone());
         let n = get(&api, "/v1/notifications");
@@ -1203,10 +1291,17 @@ mod tests {
             Date: Wed, 07 Oct 2026 10:00:00 +0000\n\n> Body.\n\nWhy?\n";
         api.handle("POST", "/v1/import", reply.as_bytes());
         assert_eq!(get(&api, "/v1/status")["unread"], 1);
+        // A stranger's series, on a list or an inbox you browse, tells you nothing.
+        let stranger = "From x Thu Jan  1 00:00:00 1970\nFrom: S <s@y.org>\nTo: list@x.org\n\
+            Subject: [PATCH] bar: theirs\nMessage-ID: <s1@y>\nDate: Wed, 07 Oct 2026 10:00:00 +0000\n\nFix.\n";
+        api.handle("POST", "/v1/import", stranger.as_bytes());
+        assert_eq!(get(&api, "/v1/status")["unread"], 1);
         let n = get(&api, "/v1/notifications");
         assert!(n["notifications"][0]["replies"][0].as_str().unwrap().contains("Ann"), "{n}");
         assert_eq!(post(&api, "/v1/notifications/read", json!({"sender": sender, "key": key})).1["marked"], 1);
         assert_eq!(get(&api, "/v1/status")["unread"], 0);
+        // All: the stranger's family is recorded too, so it has a baseline.
+        assert_eq!(post(&api, "/v1/notifications/read", json!({"all": true})).1["marked"], 1);
         // Read again: nothing written, so nothing for the app to reload.
         let generation = get(&api, "/v1/status")["generation"].clone();
         assert_eq!(post(&api, "/v1/notifications/read", json!({"sender": sender, "key": key})).1["marked"], 0);
@@ -1271,6 +1366,46 @@ mod tests {
         let row = inboxes.as_array().unwrap().iter().find(|i| i["inbox"] == "linux-usb").cloned();
         assert_eq!(row.map(|r| r["since"].clone()), None, "only inboxes a project names or series are on: {inboxes}");
         assert_eq!(post(&api, "/v1/browse", json!({"inbox": "a b/c"})).0, 400);
+        let (status, v) = post(&api, "/v1/browse", json!({"inbox": "all"}));
+        assert!(status == 400 && v["error"].as_str().unwrap().contains("every inbox"), "{v}");
+    }
+
+    #[test]
+    fn inboxes_come_newest_first_under_their_projects() {
+        let api = api("inbox-list");
+        let projects = r#"[{"name": "U-Boot", "archive": "https://lore.kernel.org", "lists": ["u-boot"]},
+                          {"name": "Linux", "archive": "https://lore.kernel.org", "lists": []}]"#;
+        post(&api, "/v1/settings", json!({"key": "projects", "value": projects}));
+        // Not read yet: one archive to read.
+        assert_eq!(post(&api, "/v1/inboxes/refresh", json!({})).1["asked"], 1);
+        assert_eq!(get(&api, "/v1/status")["sync"]["inboxes"], true);
+        let inbox = |name: &str, updated: &str| sync::InboxInfo {
+            name: name.into(),
+            description: format!("{name} list"),
+            updated: Some(updated.into()),
+        };
+        let read = sync::Effect::Inboxes {
+            archive: String::new(),
+            at: mail::utc(now_secs()),
+            inboxes: vec![
+                inbox("netdev", "2026-10-20T00:00:00Z"),
+                inbox("u-boot", "2026-10-10T00:00:00Z"),
+                inbox("linux-usb", "2026-10-25T00:00:00Z"),
+            ],
+        };
+        Store::open(&api.db).unwrap().apply(&read).unwrap();
+        let rows = get(&api, "/v1/inboxes");
+        let got: Vec<(&str, &str)> = rows
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| (r["project"].as_str().unwrap(), r["inbox"].as_str().unwrap()))
+            .collect();
+        assert_eq!(got, [("Linux", "linux-usb"), ("Linux", "netdev"), ("U-Boot", "u-boot")]);
+        assert_eq!(rows[0]["description"], "linux-usb list");
+        // Read just now: not again, unless forced.
+        assert_eq!(post(&api, "/v1/inboxes/refresh", json!({})).1["asked"], 0);
+        assert_eq!(post(&api, "/v1/inboxes/refresh", json!({"force": true})).1["asked"], 1);
     }
 
     #[test]

@@ -3,7 +3,7 @@
 //   #/f/SENDER/KEY?v=2&tab=commits&vs=1&c=2&m=MSGID   (vs: compare with; c: an open commit)
 //   #/add
 //   #/following
-//   #/settings
+//   #/settings?c=syncing
 //   #/drafts
 //   #/branches
 //   #/people?who=followed&bots=1
@@ -29,7 +29,7 @@ export type Route =
     }
   | { view: "add" }
   | { view: "following" }
-  | { view: "settings" }
+  | { view: "settings"; category?: string }
   | { view: "drafts" }
   | { view: "branches" }
   | { view: "people"; who: Who; bots: boolean }
@@ -57,7 +57,7 @@ export function parse(hash: string): Route {
   if (path[0] === "add" && path.length === 1) return { view: "add" };
   // "sync" was its name once.
   if ((path[0] === "following" || path[0] === "sync") && path.length === 1) return { view: "following" };
-  if (path[0] === "settings" && path.length === 1) return { view: "settings" };
+  if (path[0] === "settings" && path.length === 1) return { view: "settings", category: params.get("c") ?? undefined };
   if (path[0] === "drafts" && path.length === 1) return { view: "drafts" };
   if (path[0] === "branches" && path.length === 1) return { view: "branches" };
   if (path[0] === "people" && path.length === 1) return { view: "people", who, bots: params.get("bots") === "1" };
@@ -105,6 +105,7 @@ export function href(r: Route): string {
     path = "/following";
   } else if (r.view === "settings") {
     path = "/settings";
+    if (r.category) params.set("c", r.category);
   } else if (r.view === "people") {
     path = "/people";
     if (r.who !== "everyone") params.set("who", r.who);

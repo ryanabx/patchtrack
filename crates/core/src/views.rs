@@ -89,6 +89,26 @@ pub fn summary(f: &Family) -> Summary {
     }
 }
 
+/// Whether a series involves you, by one of `identities`: you sent or
+/// wrote it, replied to it, or were addressed (To or Cc) by it.
+pub fn involves(s: &Series, identities: &[String]) -> bool {
+    let addr = |who: &str| who.rsplit_once('<').map_or(who, |(_, a)| a.trim_end_matches('>')).to_lowercase();
+    identities.iter().any(|id| {
+        let id = id.to_lowercase();
+        s.is_by(&id) || s.to.contains(&id) || s.replies.iter().any(|r| addr(&r.who) == id)
+    })
+}
+
+/// Whether a series' changes are notifications: it involves you (see
+/// [`involves`]), or you follow its author or its thread. A followed list's
+/// or search's series, or one an inbox listed, is not: following a list is
+/// watching it, not being asked.
+pub fn notifies(s: &Series, identities: &[String], subs: &[Subscription], facts: &Facts) -> bool {
+    let explicit: Vec<Subscription> =
+        subs.iter().filter(|sub| matches!(sub.kind, Follow::Author | Follow::Thread)).cloned().collect();
+    involves(s, identities) || follows(s, &[], &explicit, facts)
+}
+
 /// Whether you follow a series: one of `authors` (your identities, say)
 /// sent or wrote it, or one of `subs` covers it: a followed author sent or
 /// wrote it, it is on a followed list, it is a followed thread, or a
@@ -189,6 +209,45 @@ mod tests {
         let ev = "Reviewed-by: R <r@x> <rev1@x>; applied by M <m@x> <app@x>; 2 replies";
         assert_eq!(evidence_msgids(ev), ["rev1@x", "app@x"]);
         assert!(evidence_msgids("no reply").is_empty());
+    }
+
+    #[test]
+    fn what_notifies_you() {
+        let raw = |id: &str, from: &str, to: &str, subject: &str, irt: &str| {
+            let irt = if irt.is_empty() { String::new() } else { format!("In-Reply-To: <{irt}>\n") };
+            format!(
+                "Message-ID: <{id}>\nFrom: {from}\nTo: {to}\nSubject: {subject}\n{irt}Date: Mon, 05 Oct 2026 10:00:00 +0000\n\nx\n"
+            )
+        };
+        let msgs: Vec<crate::Message> = [
+            raw("mine@x", "Me <me@x.org>", "list@v.org", "[PATCH] a: mine", ""),
+            raw("cc@x", "B <b@x.org>", "list@v.org, Me@X.org", "[PATCH] b: addressed to me", ""),
+            raw("rep@x", "C <c@x.org>", "list@v.org", "[PATCH] c: I replied", ""),
+            raw("rep-r@x", "Me <me@x.org>", "c@x.org", "Re: [PATCH] c: I replied", "rep@x"),
+            raw("other@x", "D <d@x.org>", "list@v.org", "[PATCH] d: nothing to do with me", ""),
+            raw("other-r@x", "E <e@x.org>", "d@x.org", "Re: [PATCH] d: nothing to do with me", "other@x"),
+        ]
+        .iter()
+        .map(|r| crate::Message::parse(r.as_bytes()).unwrap())
+        .collect();
+        let list = Subscription::new(Follow::List, "list", "").unwrap();
+        let mut facts = Facts::default();
+        // The list's sync found the stranger's series: you follow it, as a list's.
+        facts.found.entry("other@x".into()).or_default().insert(list.clone());
+        let all = crate::series::build(&msgs, &facts, &crate::rules::Rules::default());
+        let me = ["me@x.org".to_string()];
+        assert!(follows(&all["other@x"], &me, std::slice::from_ref(&list), &facts));
+        let notified = |subs: &[Subscription]| {
+            let mut roots: Vec<&str> =
+                all.values().filter(|s| notifies(s, &me, subs, &facts)).map(|s| s.root.as_str()).collect();
+            roots.sort_unstable();
+            roots
+        };
+        assert_eq!(notified(&[]), ["cc@x", "mine@x", "rep@x"]);
+        // A followed list does not make its series yours; a followed author does.
+        assert_eq!(notified(std::slice::from_ref(&list)), ["cc@x", "mine@x", "rep@x"]);
+        let author = Subscription::new(Follow::Author, "d@x.org", "").unwrap();
+        assert_eq!(notified(&[author]), ["cc@x", "mine@x", "other@x", "rep@x"]);
     }
 
     #[test]

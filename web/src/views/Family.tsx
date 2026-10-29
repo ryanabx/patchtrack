@@ -936,9 +936,12 @@ export function FamilyView({
   onChanged,
   onRead,
   version,
+  mine,
 }: {
   store: Store;
   route: FamilyRoute;
+  /** It is yours: "unanswered" is for you to act on. */
+  mine: boolean;
   onChanged: () => void;
   /** Ask the bridge's status again: a notification was read, or a thread asked for. */
   onRead: () => void;
@@ -1049,7 +1052,7 @@ export function FamilyView({
         <div class="pr-meta">
           <Pill state={found.state} big /> <strong>{found.sender}</strong> posted {plural(n, "patch", "patches")} in{" "}
           {plural(found.versions.length, "version")} · last activity <Time iso={lastActivity(head)} />
-          {head.unanswered && <Label text="unanswered" kind="flag" />}
+          {mine && head.unanswered && <Label text="unanswered" kind="flag" />}
         </div>
       </div>
       <nav class="tabs underline">

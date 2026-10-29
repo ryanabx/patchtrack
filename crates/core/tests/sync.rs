@@ -57,6 +57,10 @@ impl Archive {
         match req.method {
             Method::Post if self.broken_search => unavailable,
             Method::Post => ok(mbox(&self.mails.iter().collect::<Vec<_>>())),
+            Method::Get if req.url.ends_with("/manifest.js.gz") => {
+                let json = br#"{"/linux-usb/git/0.git": {"modified": 1792000000, "description": "USB"}}"#;
+                ok(json.to_vec())
+            }
             Method::Get => {
                 let id = req.url.rsplit('/').nth(1).expect("a thread URL");
                 if self.broken_threads.contains(id) {
@@ -95,6 +99,8 @@ struct Model {
 }
 
 struct Run {
+    /// The inboxes a read of the manifest found.
+    inboxes: Vec<sync::InboxInfo>,
     fetched: Vec<String>,
     /// Every request's URL, in order.
     urls: Vec<String>,
@@ -126,7 +132,8 @@ impl Model {
         plan.delay_ms = 1000;
         edit(&mut plan);
         let mut sync = Sync::new(plan, self.known());
-        let mut run = Run { fetched: vec![], urls: vec![], failed: false, logs: vec![], waits: vec![] };
+        let mut run =
+            Run { fetched: vec![], urls: vec![], failed: false, logs: vec![], waits: vec![], inboxes: vec![] };
         let mut now = self.now.max(NOW);
         while let Some(effect) = sync.next(now) {
             match effect {
@@ -161,6 +168,7 @@ impl Model {
                     self.fetched.insert(root, at);
                 }
                 Effect::TagRoot { .. } => {}
+                Effect::Inboxes { inboxes, .. } => run.inboxes = inboxes,
                 Effect::Log(line) => run.logs.push(line),
             }
         }
@@ -295,8 +303,11 @@ fn one_window(outcomes: Vec<Outcome>, retries: u32) -> (Run, Vec<Vec<u8>>) {
     (plan.threads, plan.retries, plan.delay_ms) = (false, retries, 0);
     let mut sync = Sync::new(plan, Known::default());
     let mut outcomes = outcomes.into_iter();
-    let (mut run, mut stored, mut now) =
-        (Run { fetched: vec![], urls: vec![], failed: false, logs: vec![], waits: vec![] }, vec![], NOW);
+    let (mut run, mut stored, mut now) = (
+        Run { fetched: vec![], urls: vec![], failed: false, logs: vec![], waits: vec![], inboxes: vec![] },
+        vec![],
+        NOW,
+    );
     while let Some(effect) = sync.next(now) {
         match effect {
             Effect::Fetch(req) => {
@@ -486,6 +497,41 @@ fn a_list_searches_the_whole_inbox_and_keeps_what_it_finds_without_fetching_it()
     // Incremental the second time, and nothing changed.
     let run = store.sync(&archive, |p| p.searches = vec![usb.clone()]);
     assert_eq!((run.urls.len(), run.fetched.len()), (1, 0), "{:?}", run.urls);
+}
+
+#[test]
+fn a_manifest_lists_each_inbox_once_by_its_latest_epoch() {
+    let json = br#"{
+        "/linux-usb/git/0.git": {"modified": 1790000000, "description": "Linux USB"},
+        "/linux-usb/git/1.git": {"modified": 1792000000, "description": "Linux USB development"},
+        "/u-boot/git/0.git": {"modified": 1791000000, "description": ""},
+        "/v1inbox": {"modified": 0, "description": "Old style"},
+        "/": {"modified": 5}
+    }"#;
+    let got = sync::manifest_inboxes(json).unwrap();
+    let names: Vec<(&str, &str, Option<&str>)> =
+        got.iter().map(|i| (i.name.as_str(), i.description.as_str(), i.updated.as_deref())).collect();
+    assert_eq!(
+        names,
+        [
+            ("linux-usb", "Linux USB development", Some("2026-10-14T17:46:40Z")),
+            ("u-boot", "", Some("2026-10-03T04:00:00Z")),
+            ("v1inbox", "Old style", None),
+        ]
+    );
+    assert!(sync::manifest_inboxes(b"<html>Anubis</html>").is_err());
+}
+
+#[test]
+fn reading_the_inboxes_is_one_request_and_nothing_else() {
+    let (_, mails) = theirs();
+    let archive = Archive { mails, ..Archive::default() };
+    let mut store = Model::default();
+    store.pending.insert("o-0@x".into());
+    let run = store.sync(&archive, |p| p.inboxes = true);
+    // Not the author's search, not the thread owed.
+    assert_eq!(run.urls, ["https://lore.example.org/manifest.js.gz"]);
+    assert_eq!(run.inboxes.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["linux-usb"]);
 }
 
 #[test]

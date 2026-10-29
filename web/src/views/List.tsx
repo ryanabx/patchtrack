@@ -2,13 +2,17 @@ import { useState } from "preact/hooks";
 
 import type { Summary } from "../core/Summary";
 import type { State } from "../core/State";
-import { evidenceLine, filterFamilies, inProject, isOpen, listsOf, ofFamilies, plural, qualifier, whose, withQualifier } from "../lib/format";
+import { evidenceLine, familyId, filterFamilies, inProject, isOpen, listsOf, ofFamilies, plural, qualifier, whose, withQualifier } from "../lib/format";
 import type { Scope, Who } from "../protocol";
 import { href } from "../route";
 import { Dot, Label, Time } from "./common";
 
-/** One family in a list: its title, lists, state and evidence; "not fetched" while only a search's mail is known. */
-export function Row({ f }: { f: Summary }) {
+/**
+ * One family in a list: its title, lists, state and evidence; "not fetched"
+ * while only a search's mail is known; "unanswered" on yours (`mine`), where
+ * it asks something of you.
+ */
+export function Row({ f, mine }: { f: Summary; mine: boolean }) {
   const why = evidenceLine(f.evidence);
   return (
     <li class="row">
@@ -21,7 +25,7 @@ export function Row({ f }: { f: Summary }) {
           {f.lists.map((l) => (
             <Label text={l} kind="list" />
           ))}{" "}
-          {f.unanswered && <Label text="unanswered" kind="flag" />}
+          {mine && f.unanswered && <Label text="unanswered" kind="flag" />}
           {!f.fetched && (
             <span class="label unfetched" title="Only what a search returned is here; opening the series fetches its thread">
               not fetched
@@ -179,7 +183,7 @@ export function List({ families: all, scope, projects, tab, q, who: asked, proje
         </div>
         <ul class="rows">
           {shown.map((f) => (
-            <Row key={`${f.sender}\0${f.key}`} f={f} />
+            <Row key={familyId(f)} f={f} mine={scope.mine.includes(familyId(f))} />
           ))}
           {!shown.length && (
             <li class="row empty">

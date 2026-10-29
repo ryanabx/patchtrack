@@ -118,6 +118,9 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
   const [families, setFamilies] = useState<Summary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [hash, setHash] = useState(location.hash);
+  // Counts navigations: the list replaces its address as you type, so a link
+  // back to the address the app last saw is a navigation all the same.
+  const [navigations, setNavigations] = useState(0);
   const [scope, setScope] = useState<Scope>({ mine: [], followed: [], authors: [] });
   const [projects, setProjects] = useState<string[]>([]);
   const [status, setStatus] = useState<Status | null>(null);
@@ -154,7 +157,10 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
     poll();
     const timer = setInterval(() => document.visibilityState === "visible" && poll(), POLL_MS);
     const onShow = () => document.visibilityState === "visible" && poll();
-    const onHash = () => setHash(location.hash);
+    const onHash = () => {
+      setHash(location.hash);
+      setNavigations((n) => n + 1);
+    };
     addEventListener("hashchange", onHash);
     document.addEventListener("visibilitychange", onShow);
     return () => {
@@ -187,12 +193,13 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
   if (error) main = <p class="error">{error}</p>;
   else if (!families) main = <p class="muted loading">Loading…</p>;
   else if (route.view === "add") main = <Add store={store} onAdded={reload} />;
-  else if (route.view === "settings") main = <Settings store={store} onChanged={reload} />;
+  else if (route.view === "settings") main = <Settings store={store} onChanged={reload} category={route.category} />;
   else if (route.view === "inboxes")
     main = (
       <Inboxes
         store={store}
         families={families}
+        mine={scope.mine}
         inbox={route.inbox}
         project={route.project}
         status={status}
@@ -207,12 +214,21 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
   else if (route.view === "people")
     main = <People store={store} families={families} scope={scope} who={route.who} bots={route.bots} />;
   else if (route.view === "following") main = <Following store={store} status={status} onAsked={poll} version={version} />;
-  else if (route.view === "family") main = <FamilyView store={store} route={route} onChanged={reload} onRead={poll} version={version} />;
+  else if (route.view === "family") main = (
+      <FamilyView
+        store={store}
+        route={route}
+        onChanged={reload}
+        onRead={poll}
+        version={version}
+        mine={scope.mine.includes(`${route.sender}\0${route.key}`)}
+      />
+    );
   else if (route.view === "list" || route.view === "pair")
     main = (
       // A link to the list starts from its own query; typing in the box replaces the address without one.
       <List
-        key={hash}
+        key={navigations}
         families={families}
         scope={scope}
         projects={projects}

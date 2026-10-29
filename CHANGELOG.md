@@ -34,18 +34,21 @@ match the Python version on real mail, except where noted below.
   thread fetched (the `fetch_all_threads` setting fetches them all); an
   author's threads and followed threads are fetched as before. The
   Inboxes page lists any inbox's latest series as lore's pages do, a page
-  of two days per search. Opening a series fetches its thread when it
+  of two days per search; its list of inboxes is the archive's own
+  (`manifest.js.gz`), newest first, under your projects. Opening a series fetches its thread when it
   never was or is older than `stale_minutes` (30), and Refresh fetches it
   now; a series not fetched yet says so. The series list shows what you
   follow by default.
-- **Notifications**: each series that changed since you read it (a new
-  version, a state change, new replies), counted in the bar, until you
-  mark it read or open it; what needs a reply, a ping or a RESEND in a
+- **Notifications**: each series of yours, or one you replied to, were
+  addressed by, or follow by its author or thread, that changed since you
+  read it (a new version, a state change, new replies), counted in the
+  bar, until you mark it read or open it; what needs a reply, a ping or a RESEND in a
   second tab. `news` in a terminal reads the same record.
 - **The list as GitHub's**: the search box takes `state:`, `author:`,
   `list:`, `is:unanswered`, `-` to turn any around, and `sort:updated` or
   `sort:oldest`, which State and Sort menus set; each row counts the
-  replies from people.
+  replies from people; "unanswered" marks only your own series.
+- **Settings by category**, chosen on the left.
 - **Settings live in the store**, not in a config file: `settings`,
   `follow`/`unfollow` (what `sync` searches, per list), `source` (your
   local mail) and `tree` (git trees). An exported store carries its

@@ -80,8 +80,14 @@ export class Store {
     return this.post("/v1/browse", before ? { project, inbox, before } : { project, inbox });
   }
 
+  /** The inboxes to browse, newest first. */
   inboxes(): Promise<Inbox[]> {
     return this.get("/v1/inboxes");
+  }
+
+  /** Read each archive's list of inboxes again, if it is an hour old (or `force`). */
+  refreshInboxes(force = false): Promise<{ asked: number }> {
+    return this.post("/v1/inboxes/refresh", { force });
   }
 
   /** One line per family, for the list. */

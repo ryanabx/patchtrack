@@ -66,6 +66,9 @@ pub struct Plan {
     /// Search up to here (epoch seconds), not up to now: an older page of a
     /// list. Such a sync records nothing, so the next one is not misled.
     pub until: Option<i64>,
+    /// Read the archive's list of inboxes (its `manifest.js.gz`), and
+    /// nothing else.
+    pub inboxes: bool,
     pub delay_ms: u64,
     pub retries: u32,
     /// Search a window again in halves when it returns this many.
@@ -94,6 +97,7 @@ impl Plan {
             threads: true,
             wide_threads: false,
             until: None,
+            inboxes: false,
             delay_ms: 1000,
             retries: 3,
             split_at: SPLIT_AT,
@@ -159,19 +163,66 @@ pub enum Effect {
     WantThread { root: String, at: String, archive: String },
     /// The whole thread was fetched from this archive.
     Fetched { root: String, at: String, archive: String },
+    /// The archive lists these inboxes (all of them: what it listed
+    /// before and no longer does is gone).
+    Inboxes { archive: String, at: String, inboxes: Vec<InboxInfo> },
     /// A line of progress for the user.
     Log(String),
+}
+
+/// An inbox an archive lists, as its front page shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct InboxInfo {
+    pub name: String,
+    pub description: String,
+    /// When it last changed (UTC), if the archive says.
+    pub updated: Option<String>,
+}
+
+/// The inboxes in a grokmirror manifest, as public-inbox serves it
+/// (`manifest.js.gz`): each repository is "/NAME/git/N.git" (an epoch) or
+/// "/NAME", and an inbox changed when its latest epoch did. Sorted by name.
+pub fn manifest_inboxes(json: &[u8]) -> Result<Vec<InboxInfo>, String> {
+    let v: serde_json::Value = serde_json::from_slice(json).map_err(|e| format!("not a manifest: {e}"))?;
+    let repos = v.as_object().ok_or("not a manifest: not an object")?;
+    let mut out: BTreeMap<String, (i64, String)> = BTreeMap::new();
+    for (path, repo) in repos {
+        let Some(name) = path.trim_start_matches('/').split('/').next().filter(|n| !n.is_empty()) else { continue };
+        let modified = repo["modified"].as_i64().unwrap_or(0);
+        let description = repo["description"].as_str().unwrap_or_default().trim().to_string();
+        let e = out.entry(name.to_string()).or_insert((i64::MIN, String::new()));
+        if modified >= e.0 {
+            e.0 = modified;
+            if !description.is_empty() {
+                e.1 = description;
+            }
+        } else if e.1.is_empty() {
+            e.1 = description;
+        }
+    }
+    Ok(out
+        .into_iter()
+        .map(|(name, (modified, description))| InboxInfo {
+            name,
+            description,
+            updated: (modified > 0).then(|| mail::utc(modified)),
+        })
+        .collect())
 }
 
 enum Job {
     Search(Subscription),
     Threads,
+    Inboxes,
 }
 
 /// What a request was for.
 #[derive(Debug, Clone)]
 enum Kind {
     Window,
+    /// The archive's manifest.
+    Manifest,
     /// A thread, by its root; or by any message in it, for a followed
     /// thread not yet in the store, whose root its answer shows.
     Thread(String, Option<Subscription>),
@@ -224,6 +275,9 @@ impl Sync {
         let mut jobs: VecDeque<Job> =
             plan.searches.iter().filter(|s| s.kind != Follow::Thread).cloned().map(Job::Search).collect();
         jobs.push_back(Job::Threads);
+        if plan.inboxes {
+            jobs = VecDeque::from([Job::Inboxes]);
+        }
         Sync {
             plan,
             known,
@@ -309,6 +363,10 @@ impl Sync {
         match self.jobs.pop_front() {
             Some(Job::Search(sub)) => self.start_search(sub, now_ms),
             Some(Job::Threads) => self.start_threads(now_ms),
+            Some(Job::Inboxes) => {
+                let url = format!("{}/manifest.js.gz", self.plan.archive);
+                self.request(Kind::Manifest, Method::Get, url, now_ms);
+            }
             None => self.finish(),
         }
     }
@@ -561,6 +619,19 @@ impl Sync {
                     }
                 }
             }
+            Kind::Manifest => {
+                // 404: an archive that lists none; recorded, so it is not asked again at once.
+                let inboxes = if body.is_empty() { Ok(vec![]) } else { manifest_inboxes(body) };
+                match inboxes {
+                    Ok(inboxes) => {
+                        let n = inboxes.len();
+                        let archive = self.plan.archive_key.clone();
+                        self.out.push_back(Effect::Inboxes { archive, at: mail::utc(secs(now_ms)), inboxes });
+                        self.out.push_back(Effect::Log(format!("{}: {n} inboxes", self.plan.archive)));
+                    }
+                    Err(why) => self.request_failed(Kind::Manifest, why),
+                }
+            }
             Kind::Thread(root, sub) => {
                 let at = mail::utc(secs(now_ms));
                 if let Some(sub) = sub {
@@ -594,6 +665,10 @@ impl Sync {
             Kind::Thread(..) => {
                 self.out.push_back(Effect::Log(format!("  {why}")));
                 self.thread_failures += 1;
+            }
+            Kind::Manifest => {
+                self.out.push_back(Effect::Log(format!("the list of inboxes: {why}")));
+                self.search_failed = true;
             }
         }
     }

@@ -149,8 +149,12 @@ version also rebuilt tree checks and fetches as of then, and on a store
 created after that time it reported every tree result as fresh news
 ("rtc: applied → in-next" for a patch in next long before).
 
-The web app's Notifications are the same comparison, read one family at
-a time: "Mark as read" and opening a series' conversation store that
+The web app's Notifications are the same comparison, of the series that
+notify you (`views::notifies`: you sent or wrote them, replied, or were
+To/Cc, or you follow their author or thread), read one family at a time.
+A followed list's or a browsed inbox's series are watched, not yours:
+counting them made every patch on a list a notification. The same goes
+for `unanswered`: the app shows it on your own series only. "Mark as read" and opening a series' conversation store that
 family's snapshot (`/v1/notifications/read`); `news` in a terminal marks
 everything. Reading what is read already must write nothing: any commit
 is a change the app reloads for. The first read marks every family, or
@@ -222,7 +226,15 @@ Opening a series in the app fetches its thread when it never was or is
 older than `stale_minutes` (30), or on Refresh: the bridge marks it wanted
 (`threads.wanted_at`) and fetches what is wanted, as a sync of no
 searches does, one request each. `fetch_all_threads` brings back fetching
-every thread a list finds. A series whose thread was never read whole has
+every thread a list finds.
+
+**The inboxes to browse** come from each archive's `manifest.js.gz`
+(grokmirror's: every epoch a repository, with when it changed), read by a
+`Plan` with `inboxes` set (one request, nothing else) at most hourly, and
+kept in `archive_inboxes` (schema 8). An inbox goes under the project
+that names it, else the project that takes every inbox of its archive
+(Linux on lore). `all` is lore's every-inbox aggregate: browsing it would
+be thousands of messages and many searches, so the bridge refuses it. A series whose thread was never read whole has
 `Summary.fetched` false, and says "not fetched".
 
 ## Settings

@@ -85,7 +85,16 @@ export type Projects = { projects: Project[]; presets: Project[]; archive: strin
  * An inbox to browse: in a project ("" for none), how many series it has
  * here, when it was last listed, and how far back it has been listed.
  */
-export type Inbox = { project: string; inbox: string; listed: string | null; since: string | null; series: number };
+export type Inbox = {
+  project: string;
+  inbox: string;
+  /** What the archive says it is, and when it last changed. */
+  description: string;
+  updated: string | null;
+  listed: string | null;
+  since: string | null;
+  series: number;
+};
 
 /** Local mail the bridge reads on each sync (`patchtrack source add`). */
 export type Source = { path: string; read_at: string | null };
@@ -101,6 +110,8 @@ export type SyncStatus = {
   threads: boolean;
   /** Inboxes being listed, or waiting to be. */
   browsing: string[];
+  /** An archive's list of inboxes is being read, or waits to be. */
+  inboxes: boolean;
   started: string | null;
   finished: string | null;
   /** Whether the last sync finished with nothing failed. */
