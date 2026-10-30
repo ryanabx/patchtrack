@@ -11,6 +11,7 @@ import { Following, syncLine } from "./views/Following";
 import { List } from "./views/List";
 import { Notifications } from "./views/Notifications";
 import { Inboxes } from "./views/Inboxes";
+import { OpenThread } from "./views/OpenThread";
 import { People } from "./views/People";
 import { DraftsPage } from "./views/Drafts";
 import { Branches } from "./views/Branches";
@@ -198,7 +199,6 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
     main = (
       <Inboxes
         store={store}
-        families={families}
         mine={scope.mine}
         inbox={route.inbox}
         project={route.project}
@@ -207,6 +207,8 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
         onAsked={poll}
       />
     );
+  else if (route.view === "message")
+    main = <OpenThread store={store} msgid={route.msgid} inbox={route.inbox} project={route.project} version={version} onAsked={poll} />;
   else if (route.view === "notifications")
     main = <Notifications store={store} tab={route.tab} version={version} onChanged={poll} />;
   else if (route.view === "drafts") main = <DraftsPage store={store} version={version} />;
@@ -262,7 +264,7 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
           <a href={href({ view: "list", tab: "open", q: "", who: "followed" })} class={route.view === "list" || route.view === "family" ? "selected" : ""}>
             Series
           </a>
-          <a href={href({ view: "inboxes" })} class={route.view === "inboxes" ? "selected" : ""}>
+          <a href={href({ view: "inboxes" })} class={route.view === "inboxes" || route.view === "message" ? "selected" : ""}>
             Inboxes
           </a>
           <a href={href({ view: "notifications", tab: "unread" })} class={route.view === "notifications" ? "selected" : ""}>

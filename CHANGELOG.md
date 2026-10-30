@@ -33,8 +33,9 @@ match the Python version on real mail, except where noted below.
   list's or search's series are kept as the search returned them, with no
   thread fetched (the `fetch_all_threads` setting fetches them all); an
   author's threads and followed threads are fetched as before. The
-  Inboxes page lists any inbox's latest series as lore's pages do, a page
-  of two days per search; its list of inboxes is the archive's own
+  Inboxes page lists any inbox's newest threads as lore's pages do, 50 to
+  a page in one request, without storing their mail (opening one fetches
+  it), `all` included; its list of inboxes is the archive's own
   (`manifest.js.gz`), newest first, under your projects. Opening a series fetches its thread when it
   never was or is older than `stale_minutes` (30), and Refresh fetches it
   now; a series not fetched yet says so. The series list shows what you

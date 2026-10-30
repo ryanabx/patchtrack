@@ -24,9 +24,10 @@ pairs it. Then:
   terminal) within seconds, and shows it without a reload;
 - it fetches little: your authors' threads and the threads you follow
   whole, but a followed list's series only as its search returned them.
-  The Inboxes page lists any inbox's latest series the same way, a page
-  at a time. Opening a series fetches its thread, when it never was or
-  was more than `stale_minutes` (30) ago; Refresh fetches it now. A
+  The Inboxes page lists any inbox's newest threads as lore's own pages
+  do, 50 at a time in one request each, without fetching them; opening
+  one fetches it. Opening a series fetches its thread, when it never was
+  or was more than `stale_minutes` (30) ago; Refresh fetches it now. A
   series not fetched yet says so;
 - mail you drop on the Add mail page is imported into that store, and the
   mailboxes you added with `patchtrack source add` are read on every sync;

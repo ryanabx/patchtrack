@@ -63,9 +63,11 @@ pub struct Plan {
     /// are. Otherwise what the search returned is all there is of them
     /// until one is asked for (opened, or followed as a thread).
     pub wide_threads: bool,
-    /// Search up to here (epoch seconds), not up to now: an older page of a
-    /// list. Such a sync records nothing, so the next one is not misled.
-    pub until: Option<i64>,
+    /// Threads to fetch by any of their messages, each from its inbox:
+    /// (message-id, inbox), as a listed thread is opened.
+    pub messages: Vec<(String, String)>,
+    /// One page of an inbox's threads, and nothing else.
+    pub listing: Option<Listing>,
     /// Read the archive's list of inboxes (its `manifest.js.gz`), and
     /// nothing else.
     pub inboxes: bool,
@@ -96,7 +98,8 @@ impl Plan {
             refresh_days: 7,
             threads: true,
             wide_threads: false,
-            until: None,
+            messages: vec![],
+            listing: None,
             inboxes: false,
             delay_ms: 1000,
             retries: 3,
@@ -166,8 +169,137 @@ pub enum Effect {
     /// The archive lists these inboxes (all of them: what it listed
     /// before and no longer does is gone).
     Inboxes { archive: String, at: String, inboxes: Vec<InboxInfo> },
+    /// A page of an inbox's threads, as the archive listed them, newest
+    /// first, from `offset`.
+    Listed { archive: String, inbox: String, offset: usize, at: String, entries: Vec<Listed> },
     /// A line of progress for the user.
     Log(String),
+}
+
+/// A page of an inbox's threads to ask for: what its search export cannot
+/// do, the archive's Atom feed of a search can: the newest `limit` threads
+/// (one entry each, its newest message) from `offset`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listing {
+    pub inbox: String,
+    pub query: String,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+/// A thread an archive listed: its newest message that matched, as the
+/// Atom feed gives it. Not mail: a listing, kept apart from the messages.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(export))]
+pub struct Listed {
+    pub msgid: String,
+    pub subject: String,
+    /// "Name <address>".
+    pub author: String,
+    pub date: String,
+    pub in_reply_to: Option<String>,
+}
+
+/// The entries of a public-inbox Atom feed (a search's, with `x=A`), in
+/// its order. Its text is HTML-escaped; a message-id is the last part of
+/// its link. An entry without one is skipped.
+pub fn atom_entries(xml: &str) -> Vec<Listed> {
+    let tag = |e: &str, name: &str| -> Option<String> {
+        let open = e.find(&format!("<{name}"))?;
+        let start = open + e[open..].find('>')? + 1;
+        let end = start + e[start..].find(&format!("</{name}>"))?;
+        Some(unescape_html(&e[start..end]))
+    };
+    let msgid_of = |href: &str| -> Option<String> {
+        let last = href.trim_end_matches('/').rsplit('/').next().filter(|l| !l.is_empty())?;
+        Some(percent_decode(last))
+    };
+    let attr = |e: &str, element: &str, name: &str| -> Option<String> {
+        let at = e.find(&format!("<{element}"))?;
+        let rest = &e[at..];
+        let rest = &rest[..rest.find('>')?];
+        let a = rest.find(&format!("{name}=\""))? + name.len() + 2;
+        Some(rest[a..a + rest[a..].find('"')?].to_string())
+    };
+    let mut out = vec![];
+    for e in xml.split("<entry>").skip(1) {
+        let e = e.split("</entry>").next().unwrap_or(e);
+        let Some(msgid) = attr(e, "link", "href").and_then(|h| msgid_of(&unescape_html(&h))) else { continue };
+        let name = tag(e, "name").unwrap_or_default();
+        let email = tag(e, "email").unwrap_or_default();
+        let author = if name.is_empty() { email } else { format!("{name} <{email}>") };
+        out.push(Listed {
+            msgid,
+            subject: tag(e, "title").unwrap_or_default(),
+            author,
+            date: tag(e, "updated").unwrap_or_default(),
+            in_reply_to: attr(e, "thr:in-reply-to", "href").and_then(|h| msgid_of(&unescape_html(&h))),
+        });
+    }
+    out
+}
+
+/// Undo HTML's escapes: the named five and numeric ones.
+fn unescape_html(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(i) = rest.find('&') {
+        out.push_str(&rest[..i]);
+        rest = &rest[i..];
+        let Some(end) = rest.find(';').filter(|&e| e < 12) else {
+            out.push('&');
+            rest = &rest[1..];
+            continue;
+        };
+        let entity = &rest[1..end];
+        let c = match entity {
+            "amp" => Some('&'),
+            "lt" => Some('<'),
+            "gt" => Some('>'),
+            "quot" => Some('"'),
+            "apos" | "#39" => Some('\''),
+            _ => entity
+                .strip_prefix("#x")
+                .map(|h| u32::from_str_radix(h, 16).ok())
+                .unwrap_or_else(|| entity.strip_prefix('#').and_then(|d| d.parse().ok()))
+                .and_then(char::from_u32),
+        };
+        match c {
+            Some(c) => {
+                out.push(c);
+                rest = &rest[end + 1..];
+            }
+            None => {
+                out.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    out + rest
+}
+
+/// "%2F" to "/", as a message-id in an archive's URL is quoted.
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        let hex = (b[i] == b'%' && i + 2 < b.len())
+            .then(|| std::str::from_utf8(&b[i + 1..i + 3]).ok().and_then(|h| u8::from_str_radix(h, 16).ok()))
+            .flatten();
+        match hex {
+            Some(v) => {
+                out.push(v);
+                i += 3;
+            }
+            None => {
+                out.push(b[i]);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 /// An inbox an archive lists, as its front page shows it.
@@ -190,7 +322,13 @@ pub fn manifest_inboxes(json: &[u8]) -> Result<Vec<InboxInfo>, String> {
     for (path, repo) in repos {
         let Some(name) = path.trim_start_matches('/').split('/').next().filter(|n| !n.is_empty()) else { continue };
         let modified = repo["modified"].as_i64().unwrap_or(0);
-        let description = repo["description"].as_str().unwrap_or_default().trim().to_string();
+        // public-inbox names each epoch's repository: "Linux USB [epoch 1]".
+        let description = repo["description"].as_str().unwrap_or_default().trim();
+        let description = match description.rsplit_once(" [epoch ") {
+            Some((d, n)) if n.trim_end_matches(']').bytes().all(|b| b.is_ascii_digit()) => d.trim(),
+            _ => description,
+        }
+        .to_string();
         let e = out.entry(name.to_string()).or_insert((i64::MIN, String::new()));
         if modified >= e.0 {
             e.0 = modified;
@@ -215,6 +353,7 @@ enum Job {
     Search(Subscription),
     Threads,
     Inboxes,
+    Listing,
 }
 
 /// What a request was for.
@@ -223,9 +362,22 @@ enum Kind {
     Window,
     /// The archive's manifest.
     Manifest,
-    /// A thread, by its root; or by any message in it, for a followed
-    /// thread not yet in the store, whose root its answer shows.
-    Thread(String, Option<Subscription>),
+    /// A thread, by its root or by any message in it.
+    Thread(String, Asked),
+    /// A page of an inbox's threads.
+    Listing,
+}
+
+/// How a thread was asked for.
+#[derive(Debug, Clone)]
+enum Asked {
+    /// By its root.
+    Root,
+    /// By any message in it, for a followed thread not yet in the store,
+    /// whose root its answer shows.
+    Followed(Subscription),
+    /// By any message in it, opened from a listing of an inbox.
+    Message,
 }
 
 struct Pending {
@@ -253,10 +405,10 @@ pub struct Sync {
     jobs: VecDeque<Job>,
     out: VecDeque<Effect>,
     search: Option<Searching>,
-    threads: VecDeque<(String, (String, Option<Subscription>))>,
+    threads: VecDeque<(String, (String, Asked))>,
     thread_total: usize,
     /// Threads to fetch, and why; with the followed thread a root stands for.
-    roots: BTreeMap<String, (String, Option<Subscription>)>,
+    roots: BTreeMap<String, (String, Asked)>,
     /// The inbox a thread was found in, to fetch it from there: not every
     /// archive serves lore's "all".
     inboxes: HashMap<String, String>,
@@ -277,6 +429,8 @@ impl Sync {
         jobs.push_back(Job::Threads);
         if plan.inboxes {
             jobs = VecDeque::from([Job::Inboxes]);
+        } else if plan.listing.is_some() {
+            jobs = VecDeque::from([Job::Listing]);
         }
         Sync {
             plan,
@@ -352,7 +506,8 @@ impl Sync {
             if let Some((root, (why, sub))) = self.threads.pop_front() {
                 let i = self.thread_total - self.threads.len();
                 self.out.push_back(Effect::Log(format!("[{i}/{}] {root} ({why})", self.thread_total)));
-                let inbox = self.inbox(&root, sub.as_ref());
+                let followed = if let Asked::Followed(s) = &sub { Some(s) } else { None };
+                let inbox = self.inbox(&root, followed);
                 let url = format!("{}/{inbox}/{}/t.mbox.gz", self.plan.archive, path_quote(&root));
                 self.request(Kind::Thread(root, sub), Method::Get, url, now_ms);
             } else {
@@ -363,6 +518,18 @@ impl Sync {
         match self.jobs.pop_front() {
             Some(Job::Search(sub)) => self.start_search(sub, now_ms),
             Some(Job::Threads) => self.start_threads(now_ms),
+            Some(Job::Listing) => {
+                let l = self.plan.listing.clone().expect("a listing job has a listing");
+                let url = format!(
+                    "{}/{}/?q={}&x=A&t=1&l={}&o={}",
+                    self.plan.archive,
+                    l.inbox,
+                    form_quote(&l.query),
+                    l.limit,
+                    l.offset
+                );
+                self.request(Kind::Listing, Method::Get, url, now_ms);
+            }
             Some(Job::Inboxes) => {
                 let url = format!("{}/manifest.js.gz", self.plan.archive);
                 self.request(Kind::Manifest, Method::Get, url, now_ms);
@@ -392,7 +559,7 @@ impl Sync {
             (Some(l), true) => series::parse_utc(l).unwrap_or(first) - DAY,
             _ => self.plan.since.unwrap_or(first),
         };
-        let until = self.plan.until.unwrap_or(secs(now_ms));
+        let until = secs(now_ms);
         let step = self.plan.window_days.max(1) * DAY;
         let mut windows = VecDeque::new();
         let mut start = since;
@@ -429,13 +596,11 @@ impl Sync {
         let parsed: Vec<Message> =
             s.found.iter().filter_map(|r| Message::parse(r)).filter(|m| new.contains(&m.msgid)).collect();
         self.out.push_back(Effect::Store(s.found));
-        if self.plan.until.is_none() {
-            self.out.push_back(Effect::RecordSync {
-                sub: s.sub.clone(),
-                query: s.query.clone(),
-                ran_at: mail::utc(secs(now_ms)),
-            });
-        }
+        self.out.push_back(Effect::RecordSync {
+            sub: s.sub.clone(),
+            query: s.query.clone(),
+            ran_at: mail::utc(secs(now_ms)),
+        });
         self.known.messages.extend(parsed);
 
         let refresh = secs(now_ms) - self.plan.refresh_days * DAY;
@@ -466,7 +631,7 @@ impl Sync {
             if touched {
                 let why = if s.incremental { "new mail" } else { "in the search" };
                 if fetch {
-                    self.roots.entry(x.root.clone()).or_insert_with(|| (why.into(), None));
+                    self.roots.entry(x.root.clone()).or_insert_with(|| (why.into(), Asked::Root));
                 }
                 self.out.push_back(Effect::TagRoot {
                     root: x.root.clone(),
@@ -481,7 +646,7 @@ impl Sync {
                 }
             } else if fetch && s.incremental && theirs(x) && stale(x, refresh) {
                 let why = format!("not fetched for {} days", self.plan.refresh_days);
-                self.roots.entry(x.root.clone()).or_insert((why, None));
+                self.roots.entry(x.root.clone()).or_insert((why, Asked::Root));
             }
         }
         let kind = match (&s.last, s.incremental) {
@@ -512,13 +677,15 @@ impl Sync {
             };
             let Some(x) = found.values().find(has) else {
                 // Not in the store yet: fetch it by this message, and learn its root from the answer.
-                self.roots.entry(id.clone()).or_insert_with(|| ("a thread you follow".into(), Some(sub.clone())));
+                self.roots
+                    .entry(id.clone())
+                    .or_insert_with(|| ("a thread you follow".into(), Asked::Followed(sub.clone())));
                 continue;
             };
             self.out.push_back(Effect::Found { root: x.root.clone(), sub: sub.clone() });
             let open = !x.state.done() && x.superseded_by.is_none();
             if open || stale(x, refresh) || self.plan.full || self.plan.since.is_some() {
-                self.roots.entry(x.root.clone()).or_insert_with(|| ("a thread you follow".into(), None));
+                self.roots.entry(x.root.clone()).or_insert_with(|| ("a thread you follow".into(), Asked::Root));
             }
             self.out.push_back(Effect::RecordSync { sub, query: String::new(), ran_at: now.clone() });
         }
@@ -526,11 +693,16 @@ impl Sync {
 
     fn start_threads(&mut self, now_ms: u64) {
         self.followed_threads(now_ms);
+        // Opened from a listing: by the message, from its inbox.
+        for (msgid, inbox) in self.plan.messages.clone() {
+            self.inboxes.insert(msgid.clone(), inbox);
+            self.roots.entry(msgid).or_insert_with(|| ("opened".into(), Asked::Message));
+        }
         let facts = &self.known.facts;
         // Owed from this archive: another archive's sync fetches its own.
         let ours = |root: &&String| facts.thread_archive.get(*root).map_or("", String::as_str) == self.plan.archive_key;
         for root in facts.pending.iter().filter(ours) {
-            self.roots.entry(root.clone()).or_insert_with(|| ("an earlier fetch did not happen".into(), None));
+            self.roots.entry(root.clone()).or_insert_with(|| ("an earlier fetch did not happen".into(), Asked::Root));
         }
         let now = mail::utc(secs(now_ms));
         for root in self.roots.keys() {
@@ -619,6 +791,19 @@ impl Sync {
                     }
                 }
             }
+            Kind::Listing => {
+                let l = self.plan.listing.clone().expect("a listing job has a listing");
+                // 404: nothing matched.
+                let entries = atom_entries(&String::from_utf8_lossy(body));
+                self.out.push_back(Effect::Log(format!("{}: {} threads from {}", l.inbox, entries.len(), l.offset)));
+                self.out.push_back(Effect::Listed {
+                    archive: self.plan.archive_key.clone(),
+                    inbox: l.inbox,
+                    offset: l.offset,
+                    at: mail::utc(secs(now_ms)),
+                    entries,
+                });
+            }
             Kind::Manifest => {
                 // 404: an archive that lists none; recorded, so it is not asked again at once.
                 let inboxes = if body.is_empty() { Ok(vec![]) } else { manifest_inboxes(body) };
@@ -634,9 +819,9 @@ impl Sync {
             }
             Kind::Thread(root, sub) => {
                 let at = mail::utc(secs(now_ms));
-                if let Some(sub) = sub {
-                    // A followed thread asked for by one of its messages: its
-                    // top, the message nothing else in it answers, is the root.
+                if !matches!(sub, Asked::Root) {
+                    // Asked for by one of its messages: its top, the message
+                    // nothing else in it answers, is the root.
                     let msgs: Vec<Message> = raws.iter().filter_map(|r| Message::parse(r)).collect();
                     let ids: HashSet<&str> = msgs.iter().map(|m| m.msgid.as_str()).collect();
                     for m in msgs.iter().filter(|m| m.in_reply_to.as_deref().is_none_or(|p| !ids.contains(p))) {
@@ -644,9 +829,13 @@ impl Sync {
                             let archive = self.plan.archive_key.clone();
                             self.out.push_back(Effect::Fetched { root: m.msgid.clone(), at: at.clone(), archive });
                         }
-                        self.out.push_back(Effect::Found { root: m.msgid.clone(), sub: sub.clone() });
+                        if let Asked::Followed(sub) = &sub {
+                            self.out.push_back(Effect::Found { root: m.msgid.clone(), sub: sub.clone() });
+                        }
                     }
-                    self.out.push_back(Effect::RecordSync { sub, query: String::new(), ran_at: at.clone() });
+                    if let Asked::Followed(sub) = sub {
+                        self.out.push_back(Effect::RecordSync { sub, query: String::new(), ran_at: at.clone() });
+                    }
                 }
                 self.out.push_back(Effect::Store(raws));
                 self.out.push_back(Effect::Fetched { root, at, archive: self.plan.archive_key.clone() });
@@ -665,6 +854,10 @@ impl Sync {
             Kind::Thread(..) => {
                 self.out.push_back(Effect::Log(format!("  {why}")));
                 self.thread_failures += 1;
+            }
+            Kind::Listing => {
+                self.out.push_back(Effect::Log(format!("the listing: {why}")));
+                self.search_failed = true;
             }
             Kind::Manifest => {
                 self.out.push_back(Effect::Log(format!("the list of inboxes: {why}")));

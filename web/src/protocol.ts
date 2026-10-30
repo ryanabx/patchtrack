@@ -1,7 +1,9 @@
 // The shapes the bridge answers with that are not the core's model (those
 // are generated, in core/).
 
+import type { Listed } from "./core/Listed";
 import type { State } from "./core/State";
+import type { Summary } from "./core/Summary";
 
 /** A setting: what the core says of it, and its stored JSON (null: the default). */
 export type Setting = {
@@ -91,10 +93,19 @@ export type Inbox = {
   /** What the archive says it is, and when it last changed. */
   description: string;
   updated: string | null;
+  /** When its newest page was listed here, and how many threads it has listed. */
   listed: string | null;
-  since: string | null;
   series: number;
 };
+
+/** A thread an inbox listed: its newest message, its title, and its series where the store has it. */
+export type ListedRow = { listed: Listed; title: string; family: Summary | null };
+
+/** An inbox's listed threads, newest first; when its newest page was listed, and where the next starts. */
+export type Listing = { listed: string | null; next: number; rows: ListedRow[] };
+
+/** A listed thread, opened: its series, or it is being fetched, or the archive no longer has it. */
+export type Opened = { family: { sender: string; key: string; version: number } } | { fetching: true } | { missing: true };
 
 /** Local mail the bridge reads on each sync (`patchtrack source add`). */
 export type Source = { path: string; read_at: string | null };

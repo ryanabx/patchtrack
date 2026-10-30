@@ -219,10 +219,7 @@ as in a fresh full sync; a quiet incremental sync took 0.5 s against 43 s.
 **What is fetched whole** (decided 2026-10-29, to make far fewer
 requests): an author's threads and followed threads, on every sync. A
 followed list's or query's series are what the search returned (the
-postings, and replies that matched), with no thread fetched; so are an
-inbox's series when the web app browses it (one search for `s:PATCH` per
-page of two days, `Plan::until` for an older page, which records no sync).
-Opening a series in the app fetches its thread when it never was or is
+postings, and replies that matched), with no thread fetched. Opening a series in the app fetches its thread when it never was or is
 older than `stale_minutes` (30), or on Refresh: the bridge marks it wanted
 (`threads.wanted_at`) and fetches what is wanted, as a sync of no
 searches does, one request each. `fetch_all_threads` brings back fetching
@@ -233,9 +230,21 @@ every thread a list finds.
 `Plan` with `inboxes` set (one request, nothing else) at most hourly, and
 kept in `archive_inboxes` (schema 8). An inbox goes under the project
 that names it, else the project that takes every inbox of its archive
-(Linux on lore). `all` is lore's every-inbox aggregate: browsing it would
-be thousands of messages and many searches, so the bridge refuses it. A series whose thread was never read whole has
+(Linux on lore). A series whose thread was never read whole has
 `Summary.fetched` false, and says "not fetched".
+
+**Browsing an inbox is a listing, not mail** (2026-10-30). public-inbox's
+search export (`x=m`) returns every result, newest first, with no limit or
+offset (read in its source, `Mbox.pm` `mbox_all`), so a page of a busy
+inbox, or of `all`, by time was thousands of messages. Its Atom feed of
+a search (`x=A`) takes `l` (at most 200), `o` and `t` (one entry per
+thread, its newest message); lore honours all three (measured: a page of
+5 was 6 KB gzipped). So a page is `?q=s:PATCH&x=A&t=1&l=50&o=N`, one
+request, kept in `listings` (schema 9) apart from the messages: an
+entry's body is rendered HTML, not mail. Opening a listed thread fetches
+it by that message (`Plan::messages`; its top becomes the root), then
+shows its series. "Load older" asks for the offset after what was listed;
+new threads shift offsets, so a page may repeat or skip a thread.
 
 ## Settings
 

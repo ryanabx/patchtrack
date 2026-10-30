@@ -57,6 +57,7 @@ impl Archive {
         match req.method {
             Method::Post if self.broken_search => unavailable,
             Method::Post => ok(mbox(&self.mails.iter().collect::<Vec<_>>())),
+            Method::Get if req.url.contains("&x=A&") => ok(ATOM.as_bytes().to_vec()),
             Method::Get if req.url.ends_with("/manifest.js.gz") => {
                 let json = br#"{"/linux-usb/git/0.git": {"modified": 1792000000, "description": "USB"}}"#;
                 ok(json.to_vec())
@@ -101,6 +102,8 @@ struct Model {
 struct Run {
     /// The inboxes a read of the manifest found.
     inboxes: Vec<sync::InboxInfo>,
+    /// The threads a page of an inbox listed.
+    listed: Vec<sync::Listed>,
     fetched: Vec<String>,
     /// Every request's URL, in order.
     urls: Vec<String>,
@@ -132,8 +135,15 @@ impl Model {
         plan.delay_ms = 1000;
         edit(&mut plan);
         let mut sync = Sync::new(plan, self.known());
-        let mut run =
-            Run { fetched: vec![], urls: vec![], failed: false, logs: vec![], waits: vec![], inboxes: vec![] };
+        let mut run = Run {
+            fetched: vec![],
+            urls: vec![],
+            failed: false,
+            logs: vec![],
+            waits: vec![],
+            inboxes: vec![],
+            listed: vec![],
+        };
         let mut now = self.now.max(NOW);
         while let Some(effect) = sync.next(now) {
             match effect {
@@ -169,6 +179,7 @@ impl Model {
                 }
                 Effect::TagRoot { .. } => {}
                 Effect::Inboxes { inboxes, .. } => run.inboxes = inboxes,
+                Effect::Listed { entries, .. } => run.listed = entries,
                 Effect::Log(line) => run.logs.push(line),
             }
         }
@@ -304,7 +315,15 @@ fn one_window(outcomes: Vec<Outcome>, retries: u32) -> (Run, Vec<Vec<u8>>) {
     let mut sync = Sync::new(plan, Known::default());
     let mut outcomes = outcomes.into_iter();
     let (mut run, mut stored, mut now) = (
-        Run { fetched: vec![], urls: vec![], failed: false, logs: vec![], waits: vec![], inboxes: vec![] },
+        Run {
+            fetched: vec![],
+            urls: vec![],
+            failed: false,
+            logs: vec![],
+            waits: vec![],
+            inboxes: vec![],
+            listed: vec![],
+        },
         vec![],
         NOW,
     );
@@ -503,7 +522,7 @@ fn a_list_searches_the_whole_inbox_and_keeps_what_it_finds_without_fetching_it()
 fn a_manifest_lists_each_inbox_once_by_its_latest_epoch() {
     let json = br#"{
         "/linux-usb/git/0.git": {"modified": 1790000000, "description": "Linux USB"},
-        "/linux-usb/git/1.git": {"modified": 1792000000, "description": "Linux USB development"},
+        "/linux-usb/git/1.git": {"modified": 1792000000, "description": "Linux USB development [epoch 1]"},
         "/u-boot/git/0.git": {"modified": 1791000000, "description": ""},
         "/v1inbox": {"modified": 0, "description": "Old style"},
         "/": {"modified": 5}
@@ -534,21 +553,76 @@ fn reading_the_inboxes_is_one_request_and_nothing_else() {
     assert_eq!(run.inboxes.iter().map(|i| i.name.as_str()).collect::<Vec<_>>(), ["linux-usb"]);
 }
 
+/// A page of an Atom feed, as public-inbox writes a search's: escaped, an
+/// entry's message-id the last part of its link.
+const ATOM: &str = r#"<?xml version="1.0" encoding="us-ascii"?>
+<feed xmlns="http://www.w3.org/2005/Atom"><title>s:PATCH - search results</title><link
+rel="alternate" href="https://lore.example.org/linux-usb/?q=s:PATCH"/><updated>2026-10-29T23:46:22Z</updated>
+<entry><author><name>Ann &amp; Co</name><email>ann@x.org</email></author><title>Re: [PATCH] o: other &lt;thing&gt;</title><updated>2026-10-29T23:46:22Z</updated><link
+href="https://lore.example.org/linux-usb/o-r@x/"/><id>urn:uuid:1</id><thr:in-reply-to
+ref="urn:uuid:2"
+href="https://lore.example.org/linux-usb/o-1@x/"/><content
+type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><pre style="white-space:pre-wrap">&gt; quoted
+<a href="https://example.org/">a link</a></pre></div></content></entry>
+<entry><author><name>Dev</name><email>dev@x.org</email></author><title>[PATCH v2 0/3] a: caf&#233;</title><updated>2026-10-28T10:00:00Z</updated><link
+href="https://lore.example.org/linux-usb/a%2Fb@x/"/><id>urn:uuid:3</id><content
+type="xhtml"><div xmlns="http://www.w3.org/1999/xhtml"><pre>Cover.</pre></div></content></entry>
+</feed>"#;
+
 #[test]
-fn an_older_page_searches_up_to_its_end_and_records_nothing() {
+fn an_atom_page_lists_each_thread_by_its_newest_message() {
+    let got = sync::atom_entries(ATOM);
+    assert_eq!(
+        got,
+        [
+            sync::Listed {
+                msgid: "o-r@x".into(),
+                subject: "Re: [PATCH] o: other <thing>".into(),
+                author: "Ann & Co <ann@x.org>".into(),
+                date: "2026-10-29T23:46:22Z".into(),
+                in_reply_to: Some("o-1@x".into()),
+            },
+            sync::Listed {
+                msgid: "a/b@x".into(),
+                subject: "[PATCH v2 0/3] a: café".into(),
+                author: "Dev <dev@x.org>".into(),
+                date: "2026-10-28T10:00:00Z".into(),
+                in_reply_to: None,
+            },
+        ]
+    );
+    assert!(sync::atom_entries("<html>Anubis</html>").is_empty());
+}
+
+#[test]
+fn a_page_of_an_inbox_is_one_request_and_no_mail() {
     let (_, mails) = theirs();
     let archive = Archive { mails, ..Archive::default() };
-    let q = follow(Follow::Query, "s:PATCH", "linux-usb");
+    let mut store = Model::default();
+    store.pending.insert("o-0@x".into());
+    let listing = sync::Listing { inbox: "linux-usb".into(), query: "s:PATCH".into(), offset: 50, limit: 50 };
+    let run = store.sync(&archive, |p| p.listing = Some(listing.clone()));
+    // Not the author's search, not the thread owed: the page alone, newest threads first, from 50.
+    assert_eq!(run.urls, ["https://lore.example.org/linux-usb/?q=s%3APATCH&x=A&t=1&l=50&o=50"]);
+    assert_eq!(run.listed.iter().map(|l| l.msgid.as_str()).collect::<Vec<_>>(), ["o-r@x", "a/b@x"]);
+    assert!(store.messages.is_empty() && store.last_sync.is_empty());
+}
+
+#[test]
+fn a_listed_thread_is_fetched_by_its_message_from_its_inbox() {
+    let (root, mails) = theirs();
+    let archive = Archive { mails, ..Archive::default() };
     let mut store = Model::default();
     let run = store.sync(&archive, |p| {
-        p.searches = vec![q.clone()];
-        p.since = Some(1_792_000_000);
-        p.until = Some(1_792_100_000);
+        p.searches = vec![];
+        p.messages = vec![("o-r@x".into(), "linux-usb".into())];
     });
-    let want = sync::form_quote("(s:PATCH) AND rt:1792000000..1792100000");
-    assert_eq!(run.urls, [format!("https://lore.example.org/linux-usb/?x=m&q={want}")]);
-    // Nothing recorded: the next sync of the latest is not misled into thinking it covered now.
-    assert!(store.last_sync.is_empty());
+    assert!(run.urls.ends_with(&["https://lore.example.org/linux-usb/o-r@x/t.mbox.gz".to_string()]), "{:?}", run.urls);
+    // Its top is the root, fetched; the message it was asked by is no longer owed.
+    assert!(run.fetched.contains(&root) && store.pending.is_empty(), "{:?}", run.fetched);
+    assert_eq!(store.messages.len(), 3);
+    // Not followed: nothing found it, nothing was recorded.
+    assert!(store.found.is_empty() && store.last_sync.is_empty());
 }
 
 #[test]

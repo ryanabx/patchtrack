@@ -8,7 +8,7 @@ import type { Family } from "./core/Family";
 import type { FileChange } from "./core/FileChange";
 import type { Person } from "./core/Person";
 import type { Summary } from "./core/Summary";
-import type { Added, Draft, Inbox, Kind, ReviewComment, Notifications, Nudge, Projects, Scope, Setting, Source, Status, Subscription, Who } from "./protocol";
+import type { Added, Draft, Inbox, Kind, Listing, Opened, ReviewComment, Notifications, Nudge, Projects, Scope, Setting, Source, Status, Subscription, Who } from "./protocol";
 
 /** Where the bridge listens, and the token that pairs this app with it. */
 export type Bridge = { url: string; token: string };
@@ -75,9 +75,19 @@ export class Store {
     return this.post("/v1/open", { root, force });
   }
 
-  /** List a page of an inbox's series: the latest, or what came before `before` (a time). */
-  browse(project: string, inbox: string, before?: string): Promise<unknown> {
-    return this.post("/v1/browse", before ? { project, inbox, before } : { project, inbox });
+  /** List a page of an inbox's threads: the newest, or (`older`) the next after those listed. */
+  browse(project: string, inbox: string, older = false): Promise<unknown> {
+    return this.post("/v1/browse", { project, inbox, older });
+  }
+
+  /** What an inbox listed, newest first. */
+  listing(project: string, inbox: string): Promise<Listing> {
+    return this.get("/v1/listing", { project, inbox });
+  }
+
+  /** Open a listed thread by one of its messages: its series, once the bridge has fetched it. */
+  openMessage(msgid: string, project: string, inbox: string): Promise<Opened> {
+    return this.post("/v1/open-message", { msgid, project, inbox });
   }
 
   /** The inboxes to browse, newest first. */

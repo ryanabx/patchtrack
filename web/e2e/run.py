@@ -16,6 +16,7 @@ the bridge sync it; a bridge behind an HTTPS tunnel; a phone's width; and
 Exits non-zero if anything failed.
 """
 import argparse
+import html
 import http.server
 import json
 import os
@@ -45,8 +46,8 @@ MAILS = [
     "References: <cover@x> <p1@x>\nDate: Tue, 06 Oct 2026 10:00:00 +0000\n\nReviewed-by: Rev <rev@x>\n",
 ]
 
-# A stranger's series on linux-usb: a listing of the inbox finds the posting;
-# only its thread, fetched when it is opened, has the reply.
+# A stranger's series on linux-usb: a listing of the inbox names its posting;
+# its thread, fetched when it is opened, has the reply too.
 STRANGER = [
     "Message-ID: <stranger@x>\nFrom: Stranger <stranger@y.org>\nTo: linux-usb@vger.kernel.org\n"
     f"Subject: [PATCH] usb: a stranger's fix\nDate: {DATE}\n\nFix.\n---\n s | 1 +\n",
@@ -96,6 +97,11 @@ class Archive(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 
+    def answer_status(self, status):
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
     def answer(self, mails):
         body = mbox(mails).encode()
         self.send_response(200)
@@ -106,11 +112,29 @@ class Archive(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         Archive.seen.append(("POST", self.path, self.headers.get("User-Agent", "")))
-        # Browsing an inbox searches s:PATCH: it finds the stranger's posting too.
-        self.answer(MAILS + STRANGER[:1] if "s%3APATCH" in self.path else MAILS)
+        self.answer(MAILS)
 
     def do_GET(self):
         Archive.seen.append(("GET", self.path, self.headers.get("User-Agent", "")))
+        if "&x=A&" in self.path:
+            # A page of an inbox's threads, as Atom: the newest message of each, newest first.
+            if "&o=0" not in self.path:
+                return self.answer_status(404)
+            entries = [("stranger@x", "Stranger", "stranger@y.org", "[PATCH] usb: a stranger's fix", "2026-10-07T10:00:00Z", None),
+                       ("rev@x", "Rev", "rev@x", "Re: [PATCH 1/1] foo: part 1", "2026-10-06T10:00:00Z", "p1@x")]
+            base = f"http://{self.headers['Host']}/linux-usb/"
+            body = ('<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>s:PATCH</title>' + "".join(
+                f"<entry><author><name>{n}</name><email>{e}</email></author><title>{html.escape(t)}</title>"
+                f"<updated>{d}</updated><link\nhref=\"{base}{i}/\"/><id>urn:uuid:{i}</id>"
+                + (f"<thr:in-reply-to\nref=\"urn:uuid:x\"\nhref=\"{base}{p}/\"/>" if p else "")
+                + "<content type=\"xhtml\"><div><pre>body</pre></div></content></entry>"
+                for (i, n, e, t, d, p) in entries) + "</feed>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/atom+xml")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/manifest.js.gz":
             # As lore lists its inboxes: each epoch a repository, with when it changed.
             body = json.dumps({"/netdev/git/0.git": {"modified": 1792000000, "description": "Networking"},
@@ -571,48 +595,54 @@ def main():
             time.sleep(0.1)
         check("Sync now syncs", len(Archive.seen) > before, Archive.seen[before:])
 
-        # The inboxes, as the archive lists them, newest first; "all" is not one to list.
+        # The inboxes, as the archive lists them, newest first.
         m.go(app + "#/inboxes")
         names = m.wait("return [...document.querySelectorAll('.inbox-list li a')].map(a => a.textContent).join('|').includes('netdev') && "
                        "[...document.querySelectorAll('.inbox-list li a')].map(a => a.textContent).join('|')", 30)
         check("the inboxes come from the archive's list, newest first", names and names.index("linux-usb") < names.index("netdev"), names)
         manifests = [a for a in Archive.seen if a[1] == "/manifest.js.gz"]
-        m.go(app + "#/inboxes/all")
-        said = m.wait("return document.querySelector('.inbox-main p.error')?.textContent")
-        check("all is refused, with why, and nothing is listed",
-              said and "every inbox" in said and not m.js("return document.querySelector('.inbox-head')?.textContent.includes('Listing')"), said)
+        m.go(app + "#/inboxes/netdev")
+        m.wait("return !!document.querySelector('.inbox-head')")
         m.go(app + "#/inboxes")
         m.wait("return !!document.querySelector('.inbox-list li a')")
         check("the archive's list is read once an hour, not on every visit", len([a for a in Archive.seen if a[1] == "/manifest.js.gz"]) == len(manifests) == 1, manifests)
 
-        # An inbox, browsed: one search lists its series, and no thread is fetched
-        # until one is opened, which fetches it.
+        # An inbox, browsed: one request lists its newest threads, and stores no mail; a listed
+        # thread is fetched when it is opened, by its message.
         before = len(Archive.seen)
+        messages = cli("list", "--everyone", "--json").stdout.count('"root"')
         m.go(app + "#/inboxes/linux-usb")
-        row = m.wait("return [...document.querySelectorAll('.inbox-main .row')].find(r => r.textContent.includes(\"a stranger's fix\"))?.textContent", 30)
-        asked = Archive.seen[before:]
-        check("an inbox opened for the first time is listed, in one search", row and "not fetched" in row
-              and [a[0] for a in asked] == ["POST"] and "s%3APATCH" in asked[0][1] and asked[0][1].startswith("/linux-usb/"), (row, asked))
-        m.js("[...document.querySelectorAll('.inbox-main .row a.title-link')].find(a => a.textContent.includes(\"a stranger's fix\")).click(); return 1")
-        reply = m.wait("return !!document.querySelector('.msg[data-msgid=\"stranger-r@x\"]') && !document.querySelector('.unfetched-note, .fetching')", 30)
-        threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET"]
-        check("opening a series fetches its thread, once", reply and threads == ["/linux-usb/stranger@x/t.mbox.gz"], (reply, threads))
+        rows = m.wait("return document.querySelectorAll('.inbox-main .row').length >= 2 && "
+                      "[...document.querySelectorAll('.inbox-main .row')].map(r => r.textContent).join('|')", 30)
+        # (netdev's page, opened a moment ago, may land meanwhile.)
+        asked = [a for a in Archive.seen[before:] if "/linux-usb/" in a[1]]
+        check("an inbox opened for the first time is listed, in one request for its newest threads",
+              rows and "a stranger's fix" in rows and "not fetched" in rows and len(asked) == 1
+              and asked[0][0] == "GET" and asked[0][1].startswith("/linux-usb/?q=s%3APATCH&x=A&t=1&l=50&o=0"), (rows, asked))
+        check("and stores no mail", cli("list", "--everyone", "--json").stdout.count('"root"') == messages)
+        known = m.js("return [...document.querySelectorAll('.inbox-main .row')].find(r => r.textContent.includes('foo: do the thing'))?.textContent")
+        check("a listed thread already here shows as its series", known and "not fetched" not in known, known)
+        m.js("[...document.querySelectorAll('.inbox-main .row.listed a.title-link')].find(a => a.textContent.includes(\"a stranger's fix\")).click(); return 1")
+        reply = m.wait("return location.hash.startsWith('#/f/') && !!document.querySelector('.msg[data-msgid=\"stranger-r@x\"]')", 30)
+        threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET" and "t.mbox.gz" in a[1]]
+        check("opening a listed thread fetches it by its message, once, and opens its series",
+              reply and threads == ["/linux-usb/stranger@x/t.mbox.gz"], (reply, threads, m.js("return location.hash")))
         time.sleep(1)
         m.reload(app, m.js("return location.hash"))
         m.wait("return !!document.querySelector('.msg[data-msgid=\"stranger-r@x\"]')")
         time.sleep(1)
-        threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET"]
+        threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET" and "t.mbox.gz" in a[1]]
         check("opened again soon after, it is not fetched again", len(threads) == 1, threads)
         m.js("document.querySelector('button.refresh').click(); return 1")
         for _ in range(100):
-            threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET"]
+            threads = [a[1] for a in Archive.seen[before:] if a[0] == "GET" and "t.mbox.gz" in a[1]]
             if len(threads) == 2:
                 break
             time.sleep(0.1)
         check("Refresh fetches it again", len(threads) == 2, threads)
         m.go(app + "#/inboxes/linux-usb")
         row = m.wait("return [...document.querySelectorAll('.inbox-main .row')].find(r => r.textContent.includes(\"a stranger's fix\"))?.textContent")
-        check("and the inbox no longer says it is not fetched", row and "not fetched" not in row, row)
+        check("and the inbox then shows it as its series", row and "not fetched" not in row, row)
         m.go(app + "#/")
         mine = m.wait("return !!document.querySelector('.row') && [...document.querySelectorAll('.row-title')].map(e => e.textContent).join('|')")
         m.go(app + "#/?who=everyone")
@@ -628,9 +658,13 @@ def main():
                 break
             time.sleep(0.1)
         older = Archive.seen[listed:]
-        rt = re.search(r"rt%3A(\d+)\.\.(\d+)", older[0][1]) if older else None
-        check("Load older searches the two days before what was listed", rt and int(rt.group(2)) - int(rt.group(1)) == 2 * 86400
-              and int(rt.group(2)) < time.time() - 86400, older)
+        check("Load older asks for the threads after those listed", older and "&l=50&o=2" in older[0][1], older)
+        # Every inbox at once is a page like any other.
+        before = len(Archive.seen)
+        m.go(app + "#/inboxes/all")
+        m.wait("return document.querySelectorAll('.inbox-main .row').length >= 2", 30)
+        check("all lists the newest threads of every inbox, in one request",
+              [a[1][:20] for a in Archive.seen[before:]] == ["/all/?q=s%3APATCH&x="], Archive.seen[before:])
 
         # A bridge reached from elsewhere: behind a tunnel that speaks HTTPS (here a proxy with a
         # certificate of its own) and named by --public-url. The app asks before it pairs.

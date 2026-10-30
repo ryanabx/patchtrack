@@ -22,7 +22,7 @@ use std::collections::{BTreeMap, HashMap};
 use patchtrack_core::mail::{Addr, Message, PARSER_VERSION};
 use patchtrack_core::series::{Facts, Role, TreeRow};
 use patchtrack_core::settings::{Follow, Subscription};
-use patchtrack_core::sync::{Effect, InboxInfo};
+use patchtrack_core::sync::{Effect, InboxInfo, Listed};
 use patchtrack_core::trees::Tree;
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -213,7 +213,33 @@ const MIGRATIONS: &[&str] = &[
         archive      TEXT PRIMARY KEY,
         read_at      TEXT NOT NULL
     );",
+    // 9: the threads an archive listed for an inbox (its Atom feed of a
+    // search, each thread by its newest message), kept apart from the mail;
+    // and per inbox, when its newest page was listed and where the next
+    // page starts. Empty until an inbox is first browsed.
+    "CREATE TABLE listings (
+        archive      TEXT NOT NULL,
+        inbox        TEXT NOT NULL,
+        msgid        TEXT NOT NULL,
+        subject      TEXT NOT NULL,
+        author       TEXT NOT NULL,
+        date         TEXT NOT NULL,
+        in_reply_to  TEXT,
+        listed_at    TEXT NOT NULL,
+        PRIMARY KEY (archive, inbox, msgid)
+    );
+    CREATE TABLE listing_pages (
+        archive      TEXT NOT NULL,
+        inbox        TEXT NOT NULL,
+        listed_at    TEXT,             -- the newest page, last
+        next         INTEGER NOT NULL, -- the offset of the next older page
+        PRIMARY KEY (archive, inbox)
+    );",
 ];
+
+/// Per (archive key, inbox) listed: when its newest page was listed, and the
+/// offset of its next older page.
+pub type ListingPages = HashMap<(String, String), (Option<String>, usize)>;
 
 /// (archive key, inbox) for each inbox the archives list, and when each
 /// archive's list was read (by archive key).
@@ -364,6 +390,38 @@ impl Store {
         Ok((inboxes, read))
     }
 
+    /// What was listed for an inbox of an archive, newest first.
+    pub fn listings(&self, archive: &str, inbox: &str) -> Result<Vec<Listed>> {
+        Ok(self
+            .db
+            .prepare(
+                "SELECT msgid, subject, author, date, in_reply_to FROM listings
+                 WHERE archive = ?1 AND inbox = ?2 ORDER BY date DESC",
+            )?
+            .query_map([archive, inbox], |r| {
+                Ok(Listed {
+                    msgid: r.get(0)?,
+                    subject: r.get(1)?,
+                    author: r.get(2)?,
+                    date: r.get(3)?,
+                    in_reply_to: r.get(4)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// Per (archive, inbox) listed: when its newest page was listed, and the
+    /// offset of its next older page.
+    pub fn listing_pages(&self) -> Result<ListingPages> {
+        Ok(self
+            .db
+            .prepare("SELECT archive, inbox, listed_at, next FROM listing_pages")?
+            .query_map([], |r| {
+                Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, usize::try_from(r.get::<_, i64>(3)?).unwrap_or(0))))
+            })?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     /// A number that changes whenever another connection, of this process
     /// or another, commits to the store: what a server watches to know its
     /// answers are stale.
@@ -483,6 +541,25 @@ impl Store {
                     "INSERT INTO archive_lists_read (archive, read_at) VALUES (?1, ?2)
                      ON CONFLICT (archive) DO UPDATE SET read_at = excluded.read_at",
                     [archive, at],
+                )?;
+                tx.commit()?;
+            }
+            Effect::Listed { archive, inbox, offset, at, entries } => {
+                let tx = self.db.transaction()?;
+                for e in entries {
+                    tx.execute(
+                        "INSERT OR REPLACE INTO listings (archive, inbox, msgid, subject, author, date, in_reply_to,
+                         listed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                        params![archive, inbox, e.msgid, e.subject, e.author, e.date, e.in_reply_to, at],
+                    )?;
+                }
+                let next = i64::try_from(offset + entries.len()).unwrap_or(i64::MAX);
+                let newest = (*offset == 0).then_some(at.as_str());
+                tx.execute(
+                    "INSERT INTO listing_pages (archive, inbox, listed_at, next) VALUES (?1, ?2, ?3, ?4)
+                     ON CONFLICT (archive, inbox) DO UPDATE SET listed_at = coalesce(excluded.listed_at, listed_at),
+                         next = max(next, excluded.next)",
+                    params![archive, inbox, newest, next],
                 )?;
                 tx.commit()?;
             }
@@ -1034,6 +1111,36 @@ mod tests {
         let names: Vec<(&str, &str)> = inboxes.iter().map(|(a, i)| (a.as_str(), i.name.as_str())).collect();
         assert_eq!(names, [("", "b"), ("", "d"), ("https://other.example", "c")]);
         assert_eq!(read[""], "2026-10-02T00:00:00Z");
+    }
+
+    #[test]
+    fn listings_keep_what_each_page_said_and_where_the_next_starts() {
+        let mut s = Store::open_in_memory().unwrap();
+        let entry = |id: &str, date: &str| Listed {
+            msgid: id.into(),
+            subject: format!("[PATCH] {id}"),
+            author: "D <d@x>".into(),
+            date: date.into(),
+            in_reply_to: None,
+        };
+        let page = |offset: usize, at: &str, entries: Vec<Listed>| Effect::Listed {
+            archive: String::new(),
+            inbox: "linux-usb".into(),
+            offset,
+            at: at.into(),
+            entries,
+        };
+        s.apply(&page(0, "2026-10-29T10:00:00Z", vec![entry("b@x", "2026-10-29"), entry("a@x", "2026-10-28")]))
+            .unwrap();
+        s.apply(&page(2, "2026-10-29T10:05:00Z", vec![entry("z@x", "2026-10-20")])).unwrap();
+        // The newest again, later: when it was listed moves; where the next page starts does not go back.
+        s.apply(&page(0, "2026-10-29T11:00:00Z", vec![entry("c@x", "2026-10-29T12"), entry("b@x", "2026-10-29")]))
+            .unwrap();
+        let ids: Vec<String> = s.listings("", "linux-usb").unwrap().into_iter().map(|l| l.msgid).collect();
+        assert_eq!(ids, ["c@x", "b@x", "a@x", "z@x"]);
+        let pages = s.listing_pages().unwrap();
+        assert_eq!(pages[&(String::new(), "linux-usb".to_string())], (Some("2026-10-29T11:00:00Z".to_string()), 3));
+        assert!(s.listings("", "netdev").unwrap().is_empty());
     }
 
     #[test]

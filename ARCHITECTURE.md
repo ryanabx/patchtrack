@@ -217,8 +217,10 @@ HTTPS proxy, serving the built app too) are one server:
 - **It fetches little by default** (decided 2026-10-29): an author's
   threads and followed threads whole, on every sync; a followed list's or
   query's series only as their search returned them. The app's Inboxes
-  page lists an inbox's latest series as lore's own pages do, one search
-  (`s:PATCH`) per page of two days and no thread fetched. A thread is
+  page lists an inbox's newest threads as lore's own pages do: 50 to a
+  page, one request (the archive's Atom feed of an `s:PATCH` search,
+  which, unlike its mbox export, takes a limit and an offset), kept apart
+  from the mail; opening one fetches its thread by that message. A thread is
   fetched when its series is opened and was never fetched or is older
   than `stale_minutes` (30), or on Refresh; a series never fetched whole
   says so. The inboxes to browse are the archive's own list (its

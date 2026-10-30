@@ -9,6 +9,7 @@
 //   #/people?who=followed&bots=1
 //   #/notifications?tab=needs-you
 //   #/inboxes            #/inboxes/linux-usb?p=Linux
+//   #/m/MSGID?i=linux-usb&p=Linux    (a listed thread, opened)
 //   #/bridge?url=http://127.0.0.1:47130&token=...   (the link `patchtrack bridge` prints)
 
 import type { Who } from "./protocol";
@@ -35,6 +36,7 @@ export type Route =
   | { view: "people"; who: Who; bots: boolean }
   | { view: "notifications"; tab: "unread" | "needs-you" }
   | { view: "inboxes"; inbox?: string; project?: string }
+  | { view: "message"; msgid: string; inbox?: string; project?: string }
   | { view: "pair"; url: string; token: string }
   | { view: "missing" };
 
@@ -61,6 +63,8 @@ export function parse(hash: string): Route {
   if (path[0] === "drafts" && path.length === 1) return { view: "drafts" };
   if (path[0] === "branches" && path.length === 1) return { view: "branches" };
   if (path[0] === "people" && path.length === 1) return { view: "people", who, bots: params.get("bots") === "1" };
+  if (path[0] === "m" && path.length === 2)
+    return { view: "message", msgid: path[1], inbox: params.get("i") ?? undefined, project: params.get("p") ?? undefined };
   if (path[0] === "inboxes" && path.length <= 2) return { view: "inboxes", inbox: path[1], project: params.get("p") ?? undefined };
   if (path[0] === "notifications" && path.length === 1)
     return { view: "notifications", tab: params.get("tab") === "needs-you" ? "needs-you" : "unread" };
@@ -110,6 +114,10 @@ export function href(r: Route): string {
     path = "/people";
     if (r.who !== "everyone") params.set("who", r.who);
     if (r.bots) params.set("bots", "1");
+  } else if (r.view === "message") {
+    path = `/m/${encodeURIComponent(r.msgid)}`;
+    if (r.inbox) params.set("i", r.inbox);
+    if (r.project) params.set("p", r.project);
   } else if (r.view === "inboxes") {
     path = r.inbox ? `/inboxes/${encodeURIComponent(r.inbox)}` : "/inboxes";
     if (r.project) params.set("p", r.project);

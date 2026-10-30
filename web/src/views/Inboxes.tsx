@@ -1,20 +1,19 @@
-// An inbox's latest series, as lore's own pages list them, as GitHub lists
-// pull requests. A page is one search by the bridge, and no thread is
-// fetched: a series is fetched when you open it.
+// An inbox's newest threads, as lore's own pages list them, as GitHub lists
+// pull requests. A page is one request by the bridge (the archive's Atom
+// feed of a search: 50 threads, each by its newest message), and it stores
+// no mail: a thread is fetched when you open it.
 
 import { useEffect, useRef, useState } from "preact/hooks";
 
-import type { Summary } from "../core/Summary";
-import { familyId, plural } from "../lib/format";
-import type { Inbox, Status } from "../protocol";
+import { displayName, familyId, plural } from "../lib/format";
+import type { Inbox, ListedRow, Listing, Status } from "../protocol";
 import { href } from "../route";
 import type { Store } from "../store";
-import { Time } from "./common";
+import { Label, Time } from "./common";
 import { Row } from "./List";
 
 type Props = {
   store: Store;
-  families: Summary[];
   /** Your families, by `familyId`. */
   mine: string[];
   inbox?: string;
@@ -31,7 +30,33 @@ const SHOWN = 15;
 
 const inboxHref = (inbox: string, project: string) => href({ view: "inboxes", inbox, project: project || undefined });
 
-export function Inboxes({ store, families, mine, inbox, project = "", status, version, onAsked }: Props) {
+/** A thread listed and not in the store yet: its title, and who wrote last, when. Opening it fetches it. */
+function ListedThread({ row, inbox, project }: { row: ListedRow; inbox: string; project: string }) {
+  const l = row.listed;
+  const reply = l.subject !== row.title;
+  return (
+    <li class="row listed" data-msgid={l.msgid}>
+      <span class="dot tone-muted" aria-hidden="true">
+        ○
+      </span>
+      <div class="row-main">
+        <div class="row-title">
+          <a class="title-link" href={href({ view: "message", msgid: l.msgid, inbox, project: project || undefined })}>
+            {row.title}
+          </a>{" "}
+          <span class="label unfetched" title="Opening it fetches its thread">
+            not fetched
+          </span>
+        </div>
+        <div class="row-meta">
+          {reply ? "latest reply by" : "posted by"} {displayName(l.author)} · <Time iso={l.date} />
+        </div>
+      </div>
+    </li>
+  );
+}
+
+export function Inboxes({ store, mine, inbox, project = "", status, version, onAsked }: Props) {
   const [inboxes, setInboxes] = useState<Inbox[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [other, setOther] = useState("");
@@ -49,11 +74,16 @@ export function Inboxes({ store, families, mine, inbox, project = "", status, ve
   // Listing now, or waiting for the job before it (a sync, say).
   const doing = status?.sync.doing ?? "";
   const waiting = listing && !doing.includes(inbox ?? "");
-  const ask = (before?: string) => {
+  const ask = (older = false) => {
     if (!inbox) return;
     setError(null);
-    store.browse(project, inbox, before).then(onAsked, (e: Error) => setError(e.message));
+    store.browse(project, inbox, older).then(onAsked, (e: Error) => setError(e.message));
   };
+  const [page, setPage] = useState<Listing | null>(null);
+  useEffect(() => setPage(null), [inbox, project]);
+  useEffect(() => {
+    if (inbox) store.listing(project, inbox).then(setPage, (e: Error) => setError(e.message));
+  }, [inbox, project, version]);
   // An inbox never listed is listed when you first open it.
   const asked = useRef<string | null>(null);
   useEffect(() => {
@@ -63,12 +93,7 @@ export function Inboxes({ store, families, mine, inbox, project = "", status, ve
     ask();
   }, [inbox, project, inboxes]);
 
-  // "all" is lore's every inbox at once; a series found by searching all lists is on no one inbox.
-  const rows = inbox && inbox !== "all"
-    ? families
-        .filter((f) => f.lists.includes(inbox) && (!project || f.projects.includes(project)))
-        .sort((a, b) => b.posted.localeCompare(a.posted))
-    : [];
+  const rows = page?.rows ?? [];
   // Newest first, as the bridge sorts them; a project's section where its newest is.
   const filter = other.trim().toLowerCase();
   const byProject = new Map<string, Inbox[]>();
@@ -135,8 +160,8 @@ export function Inboxes({ store, families, mine, inbox, project = "", status, ve
           <div class="blankslate">
             <h2>Browse an inbox</h2>
             <p class="muted">
-              Its latest series, as the archive lists them: one search per page, and no thread fetched until you open a series. Your
-              projects' lists are on the left; any other inbox by its name.
+              Its newest threads, as the archive lists them: 50 to a page, one request each, and no thread fetched until you open
+              it. Your projects' lists are on the left, newest first; any other inbox by its name, "all" for every one.
             </p>
           </div>
         ) : (
@@ -167,33 +192,24 @@ export function Inboxes({ store, families, mine, inbox, project = "", status, ve
             {error && <p class="error">{error}</p>}
             <div class="box">
               <div class="box-header">
-                {plural(rows.length, "series", "series")} here{rows.some((r) => !r.fetched) && ", the ones not fetched yet as the search found them"}
+                {plural(rows.length, "thread")}, newest first; <Label text="not fetched" kind="unfetched" /> until you open one
               </div>
               <ul class="rows">
-                {rows.map((f) => (
-                  <Row key={familyId(f)} f={f} mine={mine.includes(familyId(f))} />
-                ))}
-                {!rows.length && <li class="row empty">{listing ? "Listing…" : "No series on this inbox here yet."}</li>}
+                {rows.map((r) =>
+                  r.family ? (
+                    <Row key={r.listed.msgid} f={r.family} mine={mine.includes(familyId(r.family))} />
+                  ) : (
+                    <ListedThread key={r.listed.msgid} row={r} inbox={inbox} project={project} />
+                  ),
+                )}
+                {!rows.length && <li class="row empty">{listing ? "Listing…" : page ? "Nothing listed yet." : "Loading…"}</li>}
               </ul>
             </div>
             <p class="inbox-more">
-              <button
-                type="button"
-                class="button"
-                disabled={listing || !inboxes}
-                onClick={() => ask(here?.since ?? new Date().toISOString().slice(0, 19) + "Z")}
-              >
+              <button type="button" class="button" disabled={listing || !page?.next} onClick={() => ask(true)}>
                 Load older
               </button>{" "}
-              <span class="muted small">
-                {here?.since ? (
-                  <>
-                    Listed back to <Time iso={here.since} />; two days more, in one search.
-                  </>
-                ) : (
-                  "Two days more, in one search."
-                )}
-              </span>
+              <span class="muted small">The next 50 threads, in one request.</span>
             </p>
           </>
         )}

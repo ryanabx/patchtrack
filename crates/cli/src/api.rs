@@ -214,9 +214,13 @@ impl Api {
             }
             ("POST", "/v1/browse") => {
                 let v = input()?;
-                let before =
-                    v["before"].as_str().map(|t| series::parse_utc(t).ok_or("before: not a time")).transpose()?;
-                ok(self.browse(&field(&v, "project"), &field(&v, "inbox"), before)?)
+                let older = v["older"].as_bool().unwrap_or(false);
+                ok(self.browse(&field(&v, "project"), &field(&v, "inbox"), older)?)
+            }
+            ("GET", "/v1/listing") => ok(self.listing(arg("project"), arg("inbox"))?),
+            ("POST", "/v1/open-message") => {
+                let v = input()?;
+                ok(self.open_message(&field(&v, "msgid"), &field(&v, "project"), &field(&v, "inbox"))?)
             }
             ("GET", "/v1/inboxes") => ok(self.inboxes()?),
             ("POST", "/v1/inboxes/refresh") => {
@@ -520,19 +524,71 @@ impl Api {
         Ok(if p.archive == settings.archive { String::new() } else { p.archive.clone() })
     }
 
-    /// List a page of an inbox's series, as lore's own pages do: its latest
-    /// since it was last listed, or what came before `before`. One search,
-    /// and no thread fetched.
-    fn browse(&self, project: &str, inbox: &str, before: Option<i64>) -> Result<Value> {
+    /// List a page of an inbox's threads, as lore's own pages do: the newest
+    /// `PAGE`, or (`older`) the page after those listed. One request, and no
+    /// mail stored: a thread is fetched when it is opened.
+    fn browse(&self, project: &str, inbox: &str, older: bool) -> Result<Value> {
         let settings = self.derived()?.settings.clone();
         let inbox = settings::inbox(inbox)?;
-        if inbox == "all" {
-            // Every inbox at once: a page of it is thousands of messages, many searches.
-            return Err(Fail(400, "\"all\" is every inbox at once, far too much to list: pick one inbox".into()));
-        }
         let archive = Self::archive_key(&settings, project)?;
-        self.live.browse(Job::Browse { archive, inbox, until: before });
+        let offset = if older {
+            let pages = Store::open(&self.db)?.listing_pages()?;
+            pages.get(&(archive.clone(), inbox.clone())).map_or(0, |p| p.1)
+        } else {
+            0
+        };
+        self.live.browse(Job::List { archive, inbox, offset });
         Ok(json!({"sync": self.live.status()}))
+    }
+
+    /// An inbox's listed threads, newest first, one row per thread (by its
+    /// subject without "Re:"): each with the series it is in, where the
+    /// store has it.
+    fn listing(&self, project: &str, inbox: &str) -> Result<Value> {
+        let d = self.derived()?;
+        let archive = Self::archive_key(&d.settings, project)?;
+        let store = Store::open(&self.db)?;
+        let pages = store.listing_pages()?;
+        let (listed, next) = pages.get(&(archive.clone(), inbox.to_string())).cloned().unwrap_or((None, 0));
+        let mut seen = HashSet::new();
+        let mut rows = vec![];
+        for l in store.listings(&archive, inbox)? {
+            let title = strip_re(&l.subject).to_string();
+            if !seen.insert(title.clone()) {
+                continue;
+            }
+            let family = series_of(&d, &l.msgid).and_then(|s| {
+                d.families.iter().find(|f| f.sender == s.sender && f.key == s.family).map(|f| {
+                    let mut sum = views::summary(f);
+                    sum.projects = projects::of(f.head(), &d.facts, &d.settings.projects, &d.settings.archive)
+                        .into_iter()
+                        .map(str::to_string)
+                        .collect();
+                    sum
+                })
+            });
+            rows.push(json!({"listed": l, "title": title, "family": family}));
+        }
+        Ok(json!({"listed": listed, "next": next, "rows": rows}))
+    }
+
+    /// A listed thread is opened: the series it is in, if the store has it;
+    /// else its thread is fetched by this message, from its inbox, and the
+    /// app asks again; `missing` if it was fetched and is not there (the
+    /// archive no longer has it).
+    fn open_message(&self, msgid: &str, project: &str, inbox: &str) -> Result<Value> {
+        let msgid = msgid.trim_matches(['<', '>']);
+        let d = self.derived()?;
+        if let Some(s) = series_of(&d, msgid) {
+            return Ok(json!({"family": {"sender": s.sender, "key": s.family, "version": s.version}}));
+        }
+        if d.facts.fetched.contains_key(msgid) {
+            return Ok(json!({ "missing": true }));
+        }
+        let archive = Self::archive_key(&d.settings, project)?;
+        let inbox = settings::inbox(if inbox.is_empty() { "all" } else { inbox })?;
+        self.live.browse(Job::Message { archive, inbox, msgid: msgid.to_string() });
+        Ok(json!({ "fetching": true }))
     }
 
     /// The archive key of a URL: "" for the archive setting's.
@@ -602,28 +658,17 @@ impl Api {
             row.description = info.description.clone();
             row.updated = info.updated.clone();
         }
-        for f in &d.families {
-            let s = f.head();
-            let named = projects::of(s, &d.facts, projects, &d.settings.archive);
-            let project = named.first().map_or(String::new(), |p| p.to_string());
-            for l in s.lists.iter().filter(|l| *l != "all") {
-                out.entry((project.clone(), l.clone())).or_default().series += 1;
-            }
-        }
-        for (sub, at) in &store.last_syncs()? {
-            if sub.kind == Follow::Query && sub.value == BROWSE_QUERY {
-                let project = projects
-                    .iter()
-                    .find(|p| {
-                        d.settings.own(Subscription { archive: p.archive.clone(), ..sub.clone() }).archive
-                            == sub.archive
-                    })
-                    .map_or(String::new(), |p| p.name.clone());
-                let row = out.entry((project, sub.list.clone())).or_default();
-                if row.listed.as_ref().is_none_or(|t| t < at) {
-                    row.listed = Some(at.clone());
-                }
-            }
+        for ((archive, inbox), (listed, _)) in store.listing_pages()? {
+            // Under the project of that archive that has the inbox, if any does.
+            let url = d.settings.archive_of(&archive).to_string();
+            let project = projects
+                .iter()
+                .filter(|p| p.archive == url)
+                .find(|p| p.lists.contains(&inbox) || p.lists.is_empty())
+                .map_or(String::new(), |p| p.name.clone());
+            let row = out.entry((project, inbox.clone())).or_default();
+            row.listed = listed;
+            row.series += store.listings(&archive, &inbox)?.len();
         }
         let mut rows: Vec<((String, String), Row)> = out.into_iter().collect();
         // Newest first, as the archive's front page; what it does not date, by what was listed here.
@@ -631,14 +676,14 @@ impl Api {
             let when = |r: &Row| r.updated.clone().or_else(|| r.listed.clone());
             when(y).cmp(&when(x)).then_with(|| a.cmp(b))
         });
-        let mut json_rows = vec![];
-        for ((project, inbox), row) in rows {
-            let archive = Self::archive_key(&d.settings, &project).unwrap_or_default();
-            let since = store.machine(&oldest_key(&archive, &inbox))?;
-            json_rows.push(json!({"project": project, "inbox": inbox, "description": row.description,
-                "updated": row.updated, "listed": row.listed, "since": since, "series": row.series}));
-        }
-        Ok(json!(json_rows))
+        let rows: Vec<Value> = rows
+            .into_iter()
+            .map(|((project, inbox), row)| {
+                json!({"project": project, "inbox": inbox, "description": row.description,
+                    "updated": row.updated, "listed": row.listed, "series": row.series})
+            })
+            .collect();
+        Ok(json!(rows))
     }
 
     /// One family, all of it, with each version's archive and its page there.
@@ -891,6 +936,22 @@ impl Api {
     }
 }
 
+/// The series a message is in: its root, a patch or a reply.
+fn series_of<'a>(d: &'a Derived, msgid: &str) -> Option<&'a Series> {
+    d.series.values().find(|s| {
+        s.root == msgid || s.patches.values().any(|p| p == msgid) || s.replies.iter().any(|r| r.msgid == msgid)
+    })
+}
+
+/// A subject without the "Re:" of a reply, as the thread it answers is titled.
+fn strip_re(subject: &str) -> &str {
+    let mut s = subject.trim_start();
+    while s.get(..3).is_some_and(|re| re.eq_ignore_ascii_case("re:")) {
+        s = s[3..].trim_start();
+    }
+    s
+}
+
 /// A stored message, by message-id.
 fn message<'a>(d: &'a Derived, msgid: &str) -> Result<&'a Message> {
     d.messages.iter().find(|m| m.msgid == msgid).ok_or_else(|| Fail(404, format!("no message <{msgid}>")))
@@ -916,6 +977,8 @@ const ROUTES: &[&str] = &[
     "/v1/sync",
     "/v1/open",
     "/v1/browse",
+    "/v1/listing",
+    "/v1/open-message",
     "/v1/inboxes",
     "/v1/inboxes/refresh",
     "/v1/summaries",
@@ -961,19 +1024,14 @@ fn archive_of<'a>(s: &Series, d: &'a Derived) -> &'a str {
 /// Lines of a sync's log kept for the app.
 const LOG_LINES: usize = 200;
 
-/// What browsing an inbox searches for: its patches, and replies to them.
+/// What a listing of an inbox searches for: its patches, and replies to them.
 pub const BROWSE_QUERY: &str = "s:PATCH";
+
+/// How many threads one page of an inbox lists.
+pub const PAGE: usize = 50;
 
 /// How old an archive's list of inboxes may get before it is read again, in minutes.
 pub const INBOXES_MINUTES: i64 = 60;
-
-/// How far back one page of an inbox goes, in days.
-pub const BROWSE_DAYS: i64 = 2;
-
-/// Where the store keeps how far back an inbox was listed.
-fn oldest_key(archive: &str, inbox: &str) -> String {
-    format!("browsed-since {archive} {inbox}")
-}
 
 /// What the server's own syncs do, one at a time.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -982,9 +1040,10 @@ enum Job {
     Sync,
     /// The threads asked for since (opened in the app): one request each.
     Threads,
-    /// One page of an inbox's latest series, with no thread fetched: up to
-    /// `until` (epoch seconds), or the latest since it was last browsed.
-    Browse { archive: String, inbox: String, until: Option<i64> },
+    /// A page of an inbox's threads, from `offset`: one request, no mail.
+    List { archive: String, inbox: String, offset: usize },
+    /// A listed thread, opened: fetched by this message, from its inbox.
+    Message { archive: String, inbox: String, msgid: String },
     /// The archive's list of inboxes.
     Inboxes { archive: String },
 }
@@ -994,8 +1053,9 @@ impl Job {
         match self {
             Job::Sync => "Syncing".into(),
             Job::Threads => "Fetching threads".into(),
-            Job::Browse { inbox, until: None, .. } => format!("Listing the latest on {inbox}"),
-            Job::Browse { inbox, .. } => format!("Listing older series on {inbox}"),
+            Job::List { inbox, offset: 0, .. } => format!("Listing the latest on {inbox}"),
+            Job::List { inbox, .. } => format!("Listing older threads on {inbox}"),
+            Job::Message { .. } => "Fetching a thread".into(),
             Job::Inboxes { .. } => "Reading the list of inboxes".into(),
         }
     }
@@ -1050,7 +1110,7 @@ impl Live {
     pub fn status(&self) -> Value {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let inbox = |j: &Job| match j {
-            Job::Browse { inbox, .. } => Some(inbox.clone()),
+            Job::List { inbox, .. } => Some(inbox.clone()),
             _ => None,
         };
         let browsing: Vec<String> = s.doing.iter().chain(&s.browse).filter_map(inbox).collect();
@@ -1161,32 +1221,24 @@ impl Live {
                 plan.inboxes = true;
                 crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))
             }
-            Job::Browse { archive, inbox, until } => {
-                let sub = Subscription {
-                    kind: Follow::Query,
-                    value: BROWSE_QUERY.into(),
-                    list: inbox.clone(),
-                    archive: archive.clone(),
-                };
-                let mut plan = settings.plan(vec![sub], now)?;
+            Job::List { archive, inbox, offset } => {
+                let mut plan = settings.plan(vec![], now)?;
                 plan.archive = settings.archive_of(archive).to_string();
                 plan.archive_key = archive.clone();
-                // A page: no thread is fetched until one is opened.
-                plan.wide_threads = false;
-                plan.first_since_wide = now - BROWSE_DAYS * 86_400;
-                if let Some(until) = until {
-                    plan.since = Some(until - BROWSE_DAYS * 86_400);
-                    plan.until = Some(*until);
-                }
-                let since = until.unwrap_or(now) - BROWSE_DAYS * 86_400;
-                let ok = crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))?;
-                // How far back this inbox is listed: where "Load older" goes on from.
-                let key = oldest_key(archive, inbox);
-                let before = store.machine(&key)?.as_deref().and_then(series::parse_utc);
-                if ok && before.is_none_or(|b| since < b) {
-                    store.set_machine(&key, &mail::utc(since))?;
-                }
-                Ok(ok)
+                plan.listing = Some(sync::Listing {
+                    inbox: inbox.clone(),
+                    query: BROWSE_QUERY.into(),
+                    offset: *offset,
+                    limit: PAGE,
+                });
+                crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))
+            }
+            Job::Message { archive, inbox, msgid } => {
+                let mut plan = settings.plan(vec![], now)?;
+                plan.archive = settings.archive_of(archive).to_string();
+                plan.archive_key = archive.clone();
+                plan.messages = vec![(msgid.clone(), inbox.clone())];
+                crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))
             }
         }
     }
@@ -1342,32 +1394,61 @@ mod tests {
     }
 
     #[test]
-    fn an_inbox_is_listed_by_page() {
+    fn an_inbox_is_listed_by_page_and_opened_by_message() {
         let api = api("browse");
-        post(
-            &api,
-            "/v1/settings",
-            json!({"key": "projects", "value": r#"[{"name": "Linux", "archive": "https://lore.kernel.org", "lists": ["linux-usb"]}]"#}),
-        );
+        api.handle("POST", "/v1/import", MBOX.as_bytes());
+        let linux = r#"[{"name": "Linux", "archive": "https://lore.kernel.org", "lists": ["linux-usb"]}]"#;
+        post(&api, "/v1/settings", json!({"key": "projects", "value": linux}));
         let inboxes = get(&api, "/v1/inboxes");
         assert_eq!((&inboxes[0]["project"], &inboxes[0]["inbox"]), (&json!("Linux"), &json!("linux-usb")), "{inboxes}");
         let (status, v) = post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb"}));
         assert_eq!(status, 200, "{v}");
         assert_eq!(get(&api, "/v1/status")["sync"]["browsing"], json!(["linux-usb"]));
-        // The same page asked twice waits once; an older page is another.
+        // The same page asked twice waits once.
         post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb"}));
-        post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb", "before": "2026-10-20T00:00:00Z"}));
+        assert_eq!(get(&api, "/v1/status")["sync"]["browsing"], json!(["linux-usb"]));
+        // A page, as its job stores it: a reply in a thread the store has, and a thread it has not.
+        let entry = |id: &str, subject: &str, date: &str| sync::Listed {
+            msgid: id.into(),
+            subject: subject.into(),
+            author: "A <a@z.org>".into(),
+            date: date.into(),
+            in_reply_to: None,
+        };
+        let page = sync::Effect::Listed {
+            archive: String::new(),
+            inbox: "linux-usb".into(),
+            offset: 0,
+            at: mail::utc(now_secs()),
+            entries: vec![
+                entry("r1@y", "Re: [PATCH] foo: do a thing", "2026-10-29T10:00:00Z"),
+                entry("new@z", "[PATCH] bar: new", "2026-10-28T10:00:00Z"),
+            ],
+        };
+        Store::open(&api.db).unwrap().apply(&page).unwrap();
+        let listing = get(&api, "/v1/listing?project=Linux&inbox=linux-usb");
+        assert_eq!(listing["next"], 2);
+        let rows = listing["rows"].as_array().unwrap();
+        assert_eq!(
+            (&rows[0]["title"], &rows[0]["family"]["title"]),
+            (&json!("[PATCH] foo: do a thing"), &json!("foo: do a thing"))
+        );
+        assert_eq!((&rows[1]["title"], &rows[1]["family"]), (&json!("[PATCH] bar: new"), &Value::Null));
+        // An older page goes on from what was listed.
+        post(&api, "/v1/browse", json!({"project": "Linux", "inbox": "linux-usb", "older": true}));
         assert_eq!(get(&api, "/v1/status")["sync"]["browsing"], json!(["linux-usb", "linux-usb"]));
+        // Opened: the series it is in; one the store has not, fetched; one fetched and gone, missing.
+        let open =
+            |id: &str| post(&api, "/v1/open-message", json!({"msgid": id, "project": "Linux", "inbox": "linux-usb"})).1;
+        assert_eq!(open("r1@y")["family"]["sender"], "dev@x.org");
+        assert_eq!(open("new@z")["fetching"], true);
+        let fetched = sync::Effect::Fetched { root: "new@z".into(), at: mail::utc(now_secs()), archive: String::new() };
+        Store::open(&api.db).unwrap().apply(&fetched).unwrap();
+        assert_eq!(open("new@z")["missing"], true);
+        // Every inbox at once is one page like any other.
+        assert_eq!(post(&api, "/v1/browse", json!({"inbox": "all"})).0, 200);
         assert_eq!(post(&api, "/v1/browse", json!({"project": "Nope", "inbox": "linux-usb"})).0, 400);
-        // How far back an inbox was listed, as a page's job records it, is where "Load older" goes on from.
-        Store::open(&api.db).unwrap().set_machine(&oldest_key("", "linux-usb"), "2026-10-20T00:00:00Z").unwrap();
-        post(&api, "/v1/settings", json!({"key": "projects", "value": "[]"}));
-        let inboxes = get(&api, "/v1/inboxes");
-        let row = inboxes.as_array().unwrap().iter().find(|i| i["inbox"] == "linux-usb").cloned();
-        assert_eq!(row.map(|r| r["since"].clone()), None, "only inboxes a project names or series are on: {inboxes}");
         assert_eq!(post(&api, "/v1/browse", json!({"inbox": "a b/c"})).0, 400);
-        let (status, v) = post(&api, "/v1/browse", json!({"inbox": "all"}));
-        assert!(status == 400 && v["error"].as_str().unwrap().contains("every inbox"), "{v}");
     }
 
     #[test]
