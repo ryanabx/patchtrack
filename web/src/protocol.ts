@@ -101,8 +101,12 @@ export type Inbox = {
 /** A thread an inbox listed: its newest message, its title, and its series where the store has it. */
 export type ListedRow = { listed: Listed; title: string; family: Summary | null };
 
-/** An inbox's listed threads, newest first; when its newest page was listed, and where the next starts. */
-export type Listing = { listed: string | null; next: number; rows: ListedRow[] };
+/**
+ * An inbox's listed threads (its patches, or what a search of it found),
+ * newest first; when its newest page was listed, where the next starts, and
+ * why the archive last would not list it.
+ */
+export type Listing = { listed: string | null; next: number; failed: string | null; rows: ListedRow[] };
 
 /** A listed thread, opened: its series, or it is being fetched, or the archive no longer has it. */
 export type Opened = { family: { sender: string; key: string; version: number } } | { fetching: true } | { missing: true };
@@ -121,6 +125,8 @@ export type SyncStatus = {
   threads: boolean;
   /** Inboxes being listed, or waiting to be. */
   browsing: string[];
+  /** Searches being listed, or waiting to be. */
+  searching: { inbox: string; query: string }[];
   /** An archive's list of inboxes is being read, or waits to be. */
   inboxes: boolean;
   started: string | null;

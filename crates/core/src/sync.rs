@@ -169,16 +169,21 @@ pub enum Effect {
     /// The archive lists these inboxes (all of them: what it listed
     /// before and no longer does is gone).
     Inboxes { archive: String, at: String, inboxes: Vec<InboxInfo> },
-    /// A page of an inbox's threads, as the archive listed them, newest
-    /// first, from `offset`.
-    Listed { archive: String, inbox: String, offset: usize, at: String, entries: Vec<Listed> },
+    /// A page of the threads of an inbox that match a query, as the archive
+    /// listed them, newest first, from `offset`.
+    Listed { archive: String, inbox: String, query: String, offset: usize, at: String, entries: Vec<Listed> },
+    /// The archive did not list that page: why (a query it could not
+    /// parse, a server too busy). Kept until a page of the query is listed.
+    Unlisted { archive: String, inbox: String, query: String, at: String, why: String },
     /// A line of progress for the user.
     Log(String),
 }
 
 /// A page of an inbox's threads to ask for: what its search export cannot
 /// do, the archive's Atom feed of a search can: the newest `limit` threads
-/// (one entry each, its newest message) from `offset`.
+/// that match `query` (one entry each, its newest message that does) from
+/// `offset`. Browsing an inbox is the query `s:PATCH`; a search, any query
+/// the archive takes, which it alone judges.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Listing {
     pub inbox: String,
@@ -364,7 +369,7 @@ enum Kind {
     Manifest,
     /// A thread, by its root or by any message in it.
     Thread(String, Asked),
-    /// A page of an inbox's threads.
+    /// A page of the threads of an inbox that match a query.
     Listing,
 }
 
@@ -744,6 +749,10 @@ impl Sync {
             Outcome::Response { status, retry_after, .. } if RETRY_STATUS.contains(&status) => {
                 Err((true, format!("HTTP {status}"), retry_after))
             }
+            // public-inbox answers a query it cannot parse with 400 and a page saying so.
+            Outcome::Response { status: 400, .. } if matches!(p.kind, Kind::Listing) => {
+                Err((false, "HTTP 400: the archive could not parse the query".into(), None))
+            }
             Outcome::Response { status, .. } if !(200..300).contains(&status) => {
                 Err((false, format!("HTTP {status}"), None))
             }
@@ -799,6 +808,7 @@ impl Sync {
                 self.out.push_back(Effect::Listed {
                     archive: self.plan.archive_key.clone(),
                     inbox: l.inbox,
+                    query: l.query,
                     offset: l.offset,
                     at: mail::utc(secs(now_ms)),
                     entries,
@@ -856,7 +866,15 @@ impl Sync {
                 self.thread_failures += 1;
             }
             Kind::Listing => {
+                let l = self.plan.listing.clone().expect("a listing job has a listing");
                 self.out.push_back(Effect::Log(format!("the listing: {why}")));
+                self.out.push_back(Effect::Unlisted {
+                    archive: self.plan.archive_key.clone(),
+                    inbox: l.inbox,
+                    query: l.query,
+                    at: mail::utc(secs(self.last_request.unwrap_or_default())),
+                    why,
+                });
                 self.search_failed = true;
             }
             Kind::Manifest => {

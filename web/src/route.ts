@@ -10,6 +10,7 @@
 //   #/notifications?tab=needs-you
 //   #/inboxes            #/inboxes/linux-usb?p=Linux
 //   #/m/MSGID?i=linux-usb&p=Linux    (a listed thread, opened)
+//   #/search?q=dfn:usb&i=linux-usb&p=Linux   (the archive searched: every inbox unless i says which)
 //   #/bridge?url=http://127.0.0.1:47130&token=...   (the link `patchtrack bridge` prints)
 
 import type { Who } from "./protocol";
@@ -37,6 +38,7 @@ export type Route =
   | { view: "notifications"; tab: "unread" | "needs-you" }
   | { view: "inboxes"; inbox?: string; project?: string }
   | { view: "message"; msgid: string; inbox?: string; project?: string }
+  | { view: "search"; q: string; inbox?: string; project?: string }
   | { view: "pair"; url: string; token: string }
   | { view: "missing" };
 
@@ -65,6 +67,8 @@ export function parse(hash: string): Route {
   if (path[0] === "people" && path.length === 1) return { view: "people", who, bots: params.get("bots") === "1" };
   if (path[0] === "m" && path.length === 2)
     return { view: "message", msgid: path[1], inbox: params.get("i") ?? undefined, project: params.get("p") ?? undefined };
+  if (path[0] === "search" && path.length === 1)
+    return { view: "search", q: params.get("q") ?? "", inbox: params.get("i") ?? undefined, project: params.get("p") ?? undefined };
   if (path[0] === "inboxes" && path.length <= 2) return { view: "inboxes", inbox: path[1], project: params.get("p") ?? undefined };
   if (path[0] === "notifications" && path.length === 1)
     return { view: "notifications", tab: params.get("tab") === "needs-you" ? "needs-you" : "unread" };
@@ -117,6 +121,11 @@ export function href(r: Route): string {
   } else if (r.view === "message") {
     path = `/m/${encodeURIComponent(r.msgid)}`;
     if (r.inbox) params.set("i", r.inbox);
+    if (r.project) params.set("p", r.project);
+  } else if (r.view === "search") {
+    path = "/search";
+    if (r.q) params.set("q", r.q);
+    if (r.inbox && r.inbox !== "all") params.set("i", r.inbox);
     if (r.project) params.set("p", r.project);
   } else if (r.view === "inboxes") {
     path = r.inbox ? `/inboxes/${encodeURIComponent(r.inbox)}` : "/inboxes";

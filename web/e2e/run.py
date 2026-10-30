@@ -28,6 +28,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from marionette import Marionette  # noqa: E402
@@ -117,11 +118,25 @@ class Archive(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         Archive.seen.append(("GET", self.path, self.headers.get("User-Agent", "")))
         if "&x=A&" in self.path:
-            # A page of an inbox's threads, as Atom: the newest message of each, newest first.
+            # A page of a search, as Atom: the newest message of each thread that matched, newest
+            # first. Every word must be in its subject (s: or not); "BAD(" is a query it cannot parse.
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)["q"][0]
+            if "BAD(" in query:
+                body = b"<html><body>Bad query</body></html>"
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             if "&o=0" not in self.path:
                 return self.answer_status(404)
             entries = [("stranger@x", "Stranger", "stranger@y.org", "[PATCH] usb: a stranger's fix", "2026-10-07T10:00:00Z", None),
                        ("rev@x", "Rev", "rev@x", "Re: [PATCH 1/1] foo: part 1", "2026-10-06T10:00:00Z", "p1@x")]
+            words = [w.removeprefix("s:").lower() for w in query.split()]
+            entries = [e for e in entries if all(w in e[3].lower() for w in words)]
+            if not entries:
+                return self.answer_status(404)
             base = f"http://{self.headers['Host']}/linux-usb/"
             body = ('<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><title>s:PATCH</title>' + "".join(
                 f"<entry><author><name>{n}</name><email>{e}</email></author><title>{html.escape(t)}</title>"
@@ -665,6 +680,47 @@ def main():
         m.wait("return document.querySelectorAll('.inbox-main .row').length >= 2", 30)
         check("all lists the newest threads of every inbox, in one request",
               [a[1][:20] for a in Archive.seen[before:]] == ["/all/?q=s%3APATCH&x="], Archive.seen[before:])
+
+        # Search: the box in the bar searches every inbox, in one request, as a listing of its own.
+        before = len(Archive.seen)
+        m.js("const i = document.querySelector('.appbar-search input'); i.value = 'stranger';"
+             "i.form.requestSubmit(); return 1")
+        rows = m.wait("return location.hash.startsWith('#/search') && !!document.querySelector('.archive-search .rows .row:not(.empty)') && "
+                      "[...document.querySelectorAll('.archive-search .rows .row')].map(r => r.textContent).join('|')", 30)
+        asked = [a[1] for a in Archive.seen[before:]]
+        check("a search from the bar asks the archive once, in every inbox, and lists what matched",
+              rows and "a stranger's fix" in rows and "|" not in rows
+              and asked == ["/all/?q=stranger&x=A&t=1&l=50&o=0"], (rows, asked, m.js("return location.hash")))
+        m.go(app + "#/inboxes/all")
+        page = m.wait("return document.querySelectorAll('.inbox-main .row').length >= 2 && "
+                      "[...document.querySelectorAll('.inbox-main .row')].map(r => r.textContent).join('|')", 30)
+        check("and the inbox's own page keeps its own threads", page and page.count("|") == 1, page)
+        before = len(Archive.seen)
+        m.js("const i = document.querySelector('.inbox-search input'); i.value = 'part'; i.form.requestSubmit(); return 1")
+        rows = m.wait("return location.hash.startsWith('#/search') && !!document.querySelector('.archive-search .rows .row:not(.empty)') && "
+                      "[...document.querySelectorAll('.archive-search .rows .row')].map(r => r.textContent).join('|')", 30)
+        check("an inbox's search box searches that inbox", rows and "|" not in rows and "stranger" not in rows
+              and [a[1][:22] for a in Archive.seen[before:]] == ["/all/?q=part&x=A&t=1&l"], (rows, Archive.seen[before:]))
+        m.go(app + "#/search?q=" + urllib.parse.quote("s:BAD(") + "&i=linux-usb")
+        failed = m.wait("return document.querySelector('.search-failed')?.textContent", 30)
+        check("a query the archive cannot parse says so, and is not taken for a bot check",
+              failed and "could not parse" in failed and "bot check" not in failed, failed)
+        nothing = m.js("return document.querySelector('.archive-search .rows .row.empty')?.textContent")
+        check("and lists nothing", nothing == "Nothing listed.", nothing)
+        m.go(app + "#/search?q=nomatch&i=linux-usb")
+        empty = m.wait("return document.querySelector('.archive-search .rows .row.empty')?.textContent === 'Nothing matched.'", 30)
+        check("a search that matches nothing says so", empty)
+        m.go(app + "#/search?q=stranger")
+        m.wait("return !!document.querySelector('.archive-search .rows .row:not(.empty)')", 30)
+        before = len(Archive.seen)
+        m.js("document.querySelector('.archive-search button.follow-search').click(); return 1")
+        m.wait("return document.querySelector('.archive-search button.follow-search').textContent === 'Following'")
+        following = cli("follow").stdout
+        check("Follow this search follows it as a query", "stranger" in following, following)
+        time.sleep(1)
+        check("and searching again was not asked for meanwhile", not [a for a in Archive.seen[before:] if "&x=A&" in a[1]], Archive.seen[before:])
+        cli("unfollow", "--query", "stranger")
+        m.wait("return document.querySelector('.sync-badge')?.textContent.startsWith('Synced')", 30)
 
         # A bridge reached from elsewhere: behind a tunnel that speaks HTTPS (here a proxy with a
         # certificate of its own) and named by --public-url. The app asks before it pairs.

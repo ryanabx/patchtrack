@@ -215,9 +215,9 @@ impl Api {
             ("POST", "/v1/browse") => {
                 let v = input()?;
                 let older = v["older"].as_bool().unwrap_or(false);
-                ok(self.browse(&field(&v, "project"), &field(&v, "inbox"), older)?)
+                ok(self.browse(&field(&v, "project"), &field(&v, "inbox"), &field(&v, "query"), older)?)
             }
-            ("GET", "/v1/listing") => ok(self.listing(arg("project"), arg("inbox"))?),
+            ("GET", "/v1/listing") => ok(self.listing(arg("project"), arg("inbox"), arg("query"))?),
             ("POST", "/v1/open-message") => {
                 let v = input()?;
                 ok(self.open_message(&field(&v, "msgid"), &field(&v, "project"), &field(&v, "inbox"))?)
@@ -524,35 +524,40 @@ impl Api {
         Ok(if p.archive == settings.archive { String::new() } else { p.archive.clone() })
     }
 
-    /// List a page of an inbox's threads, as lore's own pages do: the newest
+    /// List a page of the threads of an inbox that match a query (an inbox's
+    /// patches, `BROWSE_QUERY`, if none), as lore's own pages do: the newest
     /// `PAGE`, or (`older`) the page after those listed. One request, and no
-    /// mail stored: a thread is fetched when it is opened.
-    fn browse(&self, project: &str, inbox: &str, older: bool) -> Result<Value> {
+    /// mail stored: a thread is fetched when it is opened. The archive is the
+    /// judge of the query: one it cannot parse is reported by the listing.
+    fn browse(&self, project: &str, inbox: &str, query: &str, older: bool) -> Result<Value> {
         let settings = self.derived()?.settings.clone();
         let inbox = settings::inbox(inbox)?;
+        let query = search_query(query)?;
         let archive = Self::archive_key(&settings, project)?;
         let offset = if older {
             let pages = Store::open(&self.db)?.listing_pages()?;
-            pages.get(&(archive.clone(), inbox.clone())).map_or(0, |p| p.1)
+            pages.get(&(archive.clone(), inbox.clone(), query.clone())).map_or(0, |p| p.next)
         } else {
             0
         };
-        self.live.browse(Job::List { archive, inbox, offset });
+        self.live.browse(Job::List { archive, inbox, query, offset });
         Ok(json!({"sync": self.live.status()}))
     }
 
-    /// An inbox's listed threads, newest first, one row per thread (by its
-    /// subject without "Re:"): each with the series it is in, where the
-    /// store has it.
-    fn listing(&self, project: &str, inbox: &str) -> Result<Value> {
+    /// The threads listed for a query on an inbox (its patches if none),
+    /// newest first, one row per thread (by its subject without "Re:"): each
+    /// with the series it is in, where the store has it; and why the archive
+    /// last would not list it, if it would not.
+    fn listing(&self, project: &str, inbox: &str, query: &str) -> Result<Value> {
         let d = self.derived()?;
         let archive = Self::archive_key(&d.settings, project)?;
+        let query = search_query(query)?;
         let store = Store::open(&self.db)?;
         let pages = store.listing_pages()?;
-        let (listed, next) = pages.get(&(archive.clone(), inbox.to_string())).cloned().unwrap_or((None, 0));
+        let page = pages.get(&(archive.clone(), inbox.to_string(), query.clone())).cloned().unwrap_or_default();
         let mut seen = HashSet::new();
         let mut rows = vec![];
-        for l in store.listings(&archive, inbox)? {
+        for l in store.listings(&archive, inbox, &query)? {
             let title = strip_re(&l.subject).to_string();
             if !seen.insert(title.clone()) {
                 continue;
@@ -569,7 +574,7 @@ impl Api {
             });
             rows.push(json!({"listed": l, "title": title, "family": family}));
         }
-        Ok(json!({"listed": listed, "next": next, "rows": rows}))
+        Ok(json!({"listed": page.listed, "next": page.next, "failed": page.failed, "rows": rows}))
     }
 
     /// A listed thread is opened: the series it is in, if the store has it;
@@ -658,7 +663,10 @@ impl Api {
             row.description = info.description.clone();
             row.updated = info.updated.clone();
         }
-        for ((archive, inbox), (listed, _)) in store.listing_pages()? {
+        for ((archive, inbox, query), page) in store.listing_pages()? {
+            if query != BROWSE_QUERY {
+                continue;
+            }
             // Under the project of that archive that has the inbox, if any does.
             let url = d.settings.archive_of(&archive).to_string();
             let project = projects
@@ -667,8 +675,8 @@ impl Api {
                 .find(|p| p.lists.contains(&inbox) || p.lists.is_empty())
                 .map_or(String::new(), |p| p.name.clone());
             let row = out.entry((project, inbox.clone())).or_default();
-            row.listed = listed;
-            row.series += store.listings(&archive, &inbox)?.len();
+            row.listed = page.listed;
+            row.series += store.listings(&archive, &inbox, &query)?.len();
         }
         let mut rows: Vec<((String, String), Row)> = out.into_iter().collect();
         // Newest first, as the archive's front page; what it does not date, by what was listed here.
@@ -1030,6 +1038,16 @@ pub const BROWSE_QUERY: &str = "s:PATCH";
 /// How many threads one page of an inbox lists.
 pub const PAGE: usize = 50;
 
+/// A query as the person typed it, trimmed; the inboxes' own if empty.
+/// Only its length is checked: the archive judges the rest.
+fn search_query(query: &str) -> Result<String> {
+    let query = query.trim();
+    if query.len() > 1000 {
+        return Err(Fail(400, "the query is too long".into()));
+    }
+    Ok(if query.is_empty() { BROWSE_QUERY } else { query }.to_string())
+}
+
 /// How old an archive's list of inboxes may get before it is read again, in minutes.
 pub const INBOXES_MINUTES: i64 = 60;
 
@@ -1040,8 +1058,9 @@ enum Job {
     Sync,
     /// The threads asked for since (opened in the app): one request each.
     Threads,
-    /// A page of an inbox's threads, from `offset`: one request, no mail.
-    List { archive: String, inbox: String, offset: usize },
+    /// A page of the threads of an inbox that match a query, from `offset`:
+    /// one request, no mail.
+    List { archive: String, inbox: String, query: String, offset: usize },
     /// A listed thread, opened: fetched by this message, from its inbox.
     Message { archive: String, inbox: String, msgid: String },
     /// The archive's list of inboxes.
@@ -1053,8 +1072,11 @@ impl Job {
         match self {
             Job::Sync => "Syncing".into(),
             Job::Threads => "Fetching threads".into(),
-            Job::List { inbox, offset: 0, .. } => format!("Listing the latest on {inbox}"),
-            Job::List { inbox, .. } => format!("Listing older threads on {inbox}"),
+            Job::List { inbox, query, offset: 0, .. } if query == BROWSE_QUERY => {
+                format!("Listing the latest on {inbox}")
+            }
+            Job::List { inbox, query, .. } if query == BROWSE_QUERY => format!("Listing older threads on {inbox}"),
+            Job::List { inbox, query, .. } => format!("Searching {inbox} for {query}"),
             Job::Message { .. } => "Fetching a thread".into(),
             Job::Inboxes { .. } => "Reading the list of inboxes".into(),
         }
@@ -1109,13 +1131,18 @@ impl Live {
 
     pub fn status(&self) -> Value {
         let s = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        let inbox = |j: &Job| match j {
-            Job::List { inbox, .. } => Some(inbox.clone()),
-            _ => None,
+        let listing = |search: bool| {
+            let jobs = s.doing.iter().chain(&s.browse);
+            jobs.filter_map(move |j| match j {
+                Job::List { inbox, query, .. } if (query != BROWSE_QUERY) == search => Some((inbox, query)),
+                _ => None,
+            })
         };
-        let browsing: Vec<String> = s.doing.iter().chain(&s.browse).filter_map(inbox).collect();
+        let browsing: Vec<&String> = listing(false).map(|(inbox, _)| inbox).collect();
+        let searching: Vec<Value> =
+            listing(true).map(|(inbox, query)| json!({"inbox": inbox, "query": query})).collect();
         json!({"running": s.doing == Some(Job::Sync), "asked": s.asked, "doing": s.doing.as_ref().map(Job::describe),
-            "threads": s.threads || s.doing == Some(Job::Threads), "browsing": browsing,
+            "threads": s.threads || s.doing == Some(Job::Threads), "browsing": browsing, "searching": searching,
             "inboxes": s.doing.iter().chain(&s.browse).any(|j| matches!(j, Job::Inboxes { .. })),
             "started": s.started, "finished": s.finished, "ok": s.ok, "log": s.log})
     }
@@ -1221,16 +1248,12 @@ impl Live {
                 plan.inboxes = true;
                 crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))
             }
-            Job::List { archive, inbox, offset } => {
+            Job::List { archive, inbox, query, offset } => {
                 let mut plan = settings.plan(vec![], now)?;
                 plan.archive = settings.archive_of(archive).to_string();
                 plan.archive_key = archive.clone();
-                plan.listing = Some(sync::Listing {
-                    inbox: inbox.clone(),
-                    query: BROWSE_QUERY.into(),
-                    offset: *offset,
-                    limit: PAGE,
-                });
+                plan.listing =
+                    Some(sync::Listing { inbox: inbox.clone(), query: query.clone(), offset: *offset, limit: PAGE });
                 crate::run_plan(&mut store, &settings, plan, HashSet::new(), &agent, &mut |l| self.say(l))
             }
             Job::Message { archive, inbox, msgid } => {
@@ -1418,6 +1441,7 @@ mod tests {
         let page = sync::Effect::Listed {
             archive: String::new(),
             inbox: "linux-usb".into(),
+            query: BROWSE_QUERY.into(),
             offset: 0,
             at: mail::utc(now_secs()),
             entries: vec![
@@ -1449,6 +1473,56 @@ mod tests {
         assert_eq!(post(&api, "/v1/browse", json!({"inbox": "all"})).0, 200);
         assert_eq!(post(&api, "/v1/browse", json!({"project": "Nope", "inbox": "linux-usb"})).0, 400);
         assert_eq!(post(&api, "/v1/browse", json!({"inbox": "a b/c"})).0, 400);
+    }
+
+    #[test]
+    fn a_search_is_a_listing_of_its_own() {
+        let api = api("search");
+        let search = json!({"inbox": "all", "query": "  f:ann dfn:usb  "});
+        assert_eq!(post(&api, "/v1/browse", search).0, 200);
+        // Trimmed, and apart from the inbox's own pages.
+        let status = get(&api, "/v1/status")["sync"].clone();
+        assert_eq!(status["searching"], json!([{"inbox": "all", "query": "f:ann dfn:usb"}]));
+        assert_eq!(status["browsing"], json!([]));
+        let listed = |query: &str, id: &str| sync::Effect::Listed {
+            archive: String::new(),
+            inbox: "all".into(),
+            query: query.into(),
+            offset: 0,
+            at: mail::utc(now_secs()),
+            entries: vec![sync::Listed {
+                msgid: id.into(),
+                subject: format!("[PATCH] {id}"),
+                author: "A <a@z.org>".into(),
+                date: "2026-10-29T10:00:00Z".into(),
+                in_reply_to: None,
+            }],
+        };
+        let mut store = Store::open(&api.db).unwrap();
+        store.apply(&listed("f:ann dfn:usb", "found@z")).unwrap();
+        store.apply(&listed(BROWSE_QUERY, "page@z")).unwrap();
+        let rows = |v: &Value| -> Vec<String> {
+            v["rows"].as_array().unwrap().iter().map(|r| r["listed"]["msgid"].as_str().unwrap().to_string()).collect()
+        };
+        let found = get(&api, "/v1/listing?inbox=all&query=f%3Aann+dfn%3Ausb");
+        assert_eq!((rows(&found), &found["failed"]), (vec!["found@z".to_string()], &Value::Null));
+        assert_eq!(rows(&get(&api, "/v1/listing?inbox=all")), ["page@z"]);
+        // The inbox counts its own page, not what searches of it found.
+        let inboxes = get(&api, "/v1/inboxes");
+        let all = inboxes.as_array().unwrap().iter().find(|i| i["inbox"] == "all").unwrap();
+        assert_eq!(all["series"], 1, "{inboxes}");
+        // A query the archive refused says why.
+        let refused = sync::Effect::Unlisted {
+            archive: String::new(),
+            inbox: "all".into(),
+            query: "f:(".into(),
+            at: mail::utc(now_secs()),
+            why: "HTTP 400: the archive could not parse the query".into(),
+        };
+        store.apply(&refused).unwrap();
+        let failed = get(&api, "/v1/listing?inbox=all&query=f%3A%28");
+        assert_eq!(failed["failed"], "HTTP 400: the archive could not parse the query");
+        assert_eq!(post(&api, "/v1/browse", json!({"inbox": "all", "query": "x".repeat(1001)})).0, 400);
     }
 
     #[test]

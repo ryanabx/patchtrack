@@ -235,11 +235,53 @@ const MIGRATIONS: &[&str] = &[
         next         INTEGER NOT NULL, -- the offset of the next older page
         PRIMARY KEY (archive, inbox)
     );",
+    // 10: listings per query, so a search's results and an inbox's page do
+    // not mix, and each has its own next page; and why the archive last
+    // would not list a query (NULL once a page of it is listed). Old rows
+    // were inbox pages: their query is 's:PATCH'.
+    "CREATE TABLE listings_10 (
+        archive      TEXT NOT NULL,
+        inbox        TEXT NOT NULL,
+        query        TEXT NOT NULL,
+        msgid        TEXT NOT NULL,
+        subject      TEXT NOT NULL,
+        author       TEXT NOT NULL,
+        date         TEXT NOT NULL,
+        in_reply_to  TEXT,
+        listed_at    TEXT NOT NULL,
+        PRIMARY KEY (archive, inbox, query, msgid)
+    );
+    INSERT INTO listings_10 SELECT archive, inbox, 's:PATCH', msgid, subject, author, date, in_reply_to, listed_at
+        FROM listings;
+    DROP TABLE listings;
+    ALTER TABLE listings_10 RENAME TO listings;
+    CREATE TABLE listing_pages_10 (
+        archive      TEXT NOT NULL,
+        inbox        TEXT NOT NULL,
+        query        TEXT NOT NULL,
+        listed_at    TEXT,             -- the newest page, last
+        next         INTEGER NOT NULL, -- the offset of the next older page
+        failed       TEXT,             -- why the archive last would not list it
+        PRIMARY KEY (archive, inbox, query)
+    );
+    INSERT INTO listing_pages_10 SELECT archive, inbox, 's:PATCH', listed_at, next, NULL FROM listing_pages;
+    DROP TABLE listing_pages;
+    ALTER TABLE listing_pages_10 RENAME TO listing_pages;",
 ];
 
-/// Per (archive key, inbox) listed: when its newest page was listed, and the
-/// offset of its next older page.
-pub type ListingPages = HashMap<(String, String), (Option<String>, usize)>;
+/// What was listed of a query on an inbox of an archive.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ListingPage {
+    /// When its newest page was listed.
+    pub listed: Option<String>,
+    /// The offset of its next older page.
+    pub next: usize,
+    /// Why the archive last would not list it, until it does.
+    pub failed: Option<String>,
+}
+
+/// Per (archive key, inbox, query) listed, or asked for and refused.
+pub type ListingPages = HashMap<(String, String, String), ListingPage>;
 
 /// (archive key, inbox) for each inbox the archives list, and when each
 /// archive's list was read (by archive key).
@@ -390,15 +432,15 @@ impl Store {
         Ok((inboxes, read))
     }
 
-    /// What was listed for an inbox of an archive, newest first.
-    pub fn listings(&self, archive: &str, inbox: &str) -> Result<Vec<Listed>> {
+    /// What was listed for a query on an inbox of an archive, newest first.
+    pub fn listings(&self, archive: &str, inbox: &str, query: &str) -> Result<Vec<Listed>> {
         Ok(self
             .db
             .prepare(
                 "SELECT msgid, subject, author, date, in_reply_to FROM listings
-                 WHERE archive = ?1 AND inbox = ?2 ORDER BY date DESC",
+                 WHERE archive = ?1 AND inbox = ?2 AND query = ?3 ORDER BY date DESC",
             )?
-            .query_map([archive, inbox], |r| {
+            .query_map([archive, inbox, query], |r| {
                 Ok(Listed {
                     msgid: r.get(0)?,
                     subject: r.get(1)?,
@@ -410,14 +452,15 @@ impl Store {
             .collect::<rusqlite::Result<_>>()?)
     }
 
-    /// Per (archive, inbox) listed: when its newest page was listed, and the
-    /// offset of its next older page.
+    /// Per (archive, inbox, query) listed: when its newest page was listed,
+    /// the offset of its next older page, and why it last failed.
     pub fn listing_pages(&self) -> Result<ListingPages> {
         Ok(self
             .db
-            .prepare("SELECT archive, inbox, listed_at, next FROM listing_pages")?
+            .prepare("SELECT archive, inbox, query, listed_at, next, failed FROM listing_pages")?
             .query_map([], |r| {
-                Ok(((r.get(0)?, r.get(1)?), (r.get(2)?, usize::try_from(r.get::<_, i64>(3)?).unwrap_or(0))))
+                let next = usize::try_from(r.get::<_, i64>(4)?).unwrap_or(0);
+                Ok(((r.get(0)?, r.get(1)?, r.get(2)?), ListingPage { listed: r.get(3)?, next, failed: r.get(5)? }))
             })?
             .collect::<rusqlite::Result<_>>()?)
     }
@@ -544,24 +587,32 @@ impl Store {
                 )?;
                 tx.commit()?;
             }
-            Effect::Listed { archive, inbox, offset, at, entries } => {
+            Effect::Listed { archive, inbox, query, offset, at, entries } => {
                 let tx = self.db.transaction()?;
                 for e in entries {
                     tx.execute(
-                        "INSERT OR REPLACE INTO listings (archive, inbox, msgid, subject, author, date, in_reply_to,
-                         listed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-                        params![archive, inbox, e.msgid, e.subject, e.author, e.date, e.in_reply_to, at],
+                        "INSERT OR REPLACE INTO listings (archive, inbox, query, msgid, subject, author, date,
+                         in_reply_to, listed_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                        params![archive, inbox, query, e.msgid, e.subject, e.author, e.date, e.in_reply_to, at],
                     )?;
                 }
                 let next = i64::try_from(offset + entries.len()).unwrap_or(i64::MAX);
                 let newest = (*offset == 0).then_some(at.as_str());
                 tx.execute(
-                    "INSERT INTO listing_pages (archive, inbox, listed_at, next) VALUES (?1, ?2, ?3, ?4)
-                     ON CONFLICT (archive, inbox) DO UPDATE SET listed_at = coalesce(excluded.listed_at, listed_at),
-                         next = max(next, excluded.next)",
-                    params![archive, inbox, newest, next],
+                    "INSERT INTO listing_pages (archive, inbox, query, listed_at, next) VALUES (?1, ?2, ?3, ?4, ?5)
+                     ON CONFLICT (archive, inbox, query) DO UPDATE SET
+                         listed_at = coalesce(excluded.listed_at, listed_at), next = max(next, excluded.next),
+                         failed = NULL",
+                    params![archive, inbox, query, newest, next],
                 )?;
                 tx.commit()?;
+            }
+            Effect::Unlisted { archive, inbox, query, why, .. } => {
+                self.db.execute(
+                    "INSERT INTO listing_pages (archive, inbox, query, next, failed) VALUES (?1, ?2, ?3, 0, ?4)
+                     ON CONFLICT (archive, inbox, query) DO UPDATE SET failed = excluded.failed",
+                    params![archive, inbox, query, why],
+                )?;
             }
             Effect::Fetch(_) | Effect::Log(_) => {}
         }
@@ -1126,6 +1177,7 @@ mod tests {
         let page = |offset: usize, at: &str, entries: Vec<Listed>| Effect::Listed {
             archive: String::new(),
             inbox: "linux-usb".into(),
+            query: "s:PATCH".into(),
             offset,
             at: at.into(),
             entries,
@@ -1136,11 +1188,76 @@ mod tests {
         // The newest again, later: when it was listed moves; where the next page starts does not go back.
         s.apply(&page(0, "2026-10-29T11:00:00Z", vec![entry("c@x", "2026-10-29T12"), entry("b@x", "2026-10-29")]))
             .unwrap();
-        let ids: Vec<String> = s.listings("", "linux-usb").unwrap().into_iter().map(|l| l.msgid).collect();
-        assert_eq!(ids, ["c@x", "b@x", "a@x", "z@x"]);
+        let ids = |s: &Store, q: &str| -> Vec<String> {
+            s.listings("", "linux-usb", q).unwrap().into_iter().map(|l| l.msgid).collect()
+        };
+        assert_eq!(ids(&s, "s:PATCH"), ["c@x", "b@x", "a@x", "z@x"]);
+        let key = |q: &str| (String::new(), "linux-usb".to_string(), q.to_string());
         let pages = s.listing_pages().unwrap();
-        assert_eq!(pages[&(String::new(), "linux-usb".to_string())], (Some("2026-10-29T11:00:00Z".to_string()), 3));
-        assert!(s.listings("", "netdev").unwrap().is_empty());
+        assert_eq!(
+            pages[&key("s:PATCH")],
+            ListingPage { listed: Some("2026-10-29T11:00:00Z".into()), next: 3, failed: None }
+        );
+        assert!(s.listings("", "netdev", "s:PATCH").unwrap().is_empty());
+
+        // A search of the same inbox is a listing of its own: neither sees the other's threads.
+        let search = |query: &str, entries: Vec<Listed>| Effect::Listed {
+            archive: String::new(),
+            inbox: "linux-usb".into(),
+            query: query.into(),
+            offset: 0,
+            at: "2026-10-29T12:00:00Z".into(),
+            entries,
+        };
+        s.apply(&search("f:d", vec![entry("y@x", "2026-10-25")])).unwrap();
+        assert_eq!(ids(&s, "f:d"), ["y@x"]);
+        assert_eq!(ids(&s, "s:PATCH").len(), 4);
+        // A query the archive refused says why, until a page of it is listed.
+        let refused = |query: &str| Effect::Unlisted {
+            archive: String::new(),
+            inbox: "linux-usb".into(),
+            query: query.into(),
+            at: "2026-10-29T12:01:00Z".into(),
+            why: "HTTP 400".into(),
+        };
+        s.apply(&refused("f:(")).unwrap();
+        assert_eq!(
+            s.listing_pages().unwrap()[&key("f:(")],
+            ListingPage { listed: None, next: 0, failed: Some("HTTP 400".into()) }
+        );
+        s.apply(&refused("f:d")).unwrap();
+        assert_eq!(s.listing_pages().unwrap()[&key("f:d")].failed.as_deref(), Some("HTTP 400"));
+        s.apply(&search("f:d", vec![])).unwrap();
+        assert_eq!(s.listing_pages().unwrap()[&key("f:d")].failed, None);
+    }
+
+    #[test]
+    fn an_inbox_listed_before_searches_keeps_its_pages_as_s_patch() {
+        let p = tmp("v9");
+        let old = Connection::open(&p).unwrap();
+        old.pragma_update(None, "application_id", APPLICATION_ID).unwrap();
+        for step in &MIGRATIONS[..9] {
+            old.execute_batch(step).unwrap();
+        }
+        old.pragma_update(None, "user_version", 9).unwrap();
+        old.execute(
+            "INSERT INTO listings VALUES ('', 'linux-usb', 'a@x', '[PATCH] a', 'D <d@x>', '2026-10-28', NULL,
+             '2026-10-29T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        old.execute("INSERT INTO listing_pages VALUES ('', 'linux-usb', '2026-10-29T10:00:00Z', 50)", []).unwrap();
+        drop(old);
+        let s = Store::open(&p).unwrap();
+        assert_eq!(s.listings("", "linux-usb", "s:PATCH").unwrap()[0].msgid, "a@x");
+        let pages = s.listing_pages().unwrap();
+        let page = &pages[&(String::new(), "linux-usb".to_string(), "s:PATCH".to_string())];
+        assert_eq!(
+            (page.listed.as_deref(), page.next, page.failed.as_deref()),
+            (Some("2026-10-29T10:00:00Z"), 50, None)
+        );
+        drop(s);
+        let _ = std::fs::remove_file(p);
     }
 
     #[test]

@@ -220,7 +220,13 @@ HTTPS proxy, serving the built app too) are one server:
   page lists an inbox's newest threads as lore's own pages do: 50 to a
   page, one request (the archive's Atom feed of an `s:PATCH` search,
   which, unlike its mbox export, takes a limit and an offset), kept apart
-  from the mail; opening one fetches its thread by that message. A thread is
+  from the mail; opening one fetches its thread by that message. Search
+  is the same request with the person's query (`#/search`, the box in
+  the bar or on an inbox's page; `all` for every inbox): the archive
+  judges the query, and one it cannot parse (400) is reported as such
+  and kept with the query until a page of it is listed. Listings are kept
+  per (archive, inbox, query), so a search and an inbox's page never mix
+  (schema 10; old rows are `s:PATCH`). A thread is
   fetched when its series is opened and was never fetched or is older
   than `stale_minutes` (30), or on Refresh; a series never fetched whole
   says so. The inboxes to browse are the archive's own list (its

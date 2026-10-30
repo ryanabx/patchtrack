@@ -31,7 +31,7 @@ const SHOWN = 15;
 const inboxHref = (inbox: string, project: string) => href({ view: "inboxes", inbox, project: project || undefined });
 
 /** A thread listed and not in the store yet: its title, and who wrote last, when. Opening it fetches it. */
-function ListedThread({ row, inbox, project }: { row: ListedRow; inbox: string; project: string }) {
+export function ListedThread({ row, inbox, project }: { row: ListedRow; inbox: string; project: string }) {
   const l = row.listed;
   const reply = l.subject !== row.title;
   return (
@@ -172,6 +172,17 @@ export function Inboxes({ store, mine, inbox, project = "", status, version, onA
               </h1>
               {here?.description && <span class="muted inbox-description">{here.description}</span>}
               <span class="spacer" />
+              <form
+                class="inbox-search"
+                role="search"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const q = (e.currentTarget.elements.namedItem("q") as HTMLInputElement).value.trim();
+                  if (q) location.hash = href({ view: "search", q, inbox, project: project || undefined });
+                }}
+              >
+                <input name="q" type="search" placeholder={`Search ${inbox}`} aria-label={`Search ${inbox}`} />
+              </form>
               <span class="muted small">
                 {waiting ? (
                   `Waiting: ${doing.toLowerCase() || "another job"} first…`

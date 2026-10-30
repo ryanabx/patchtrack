@@ -13,6 +13,7 @@ import { Notifications } from "./views/Notifications";
 import { Inboxes } from "./views/Inboxes";
 import { OpenThread } from "./views/OpenThread";
 import { People } from "./views/People";
+import { Search } from "./views/Search";
 import { DraftsPage } from "./views/Drafts";
 import { Branches } from "./views/Branches";
 import { Settings } from "./views/Settings";
@@ -207,6 +208,19 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
         onAsked={poll}
       />
     );
+  else if (route.view === "search")
+    main = (
+      <Search
+        store={store}
+        mine={scope.mine}
+        q={route.q}
+        inbox={route.inbox}
+        project={route.project}
+        status={status}
+        version={version}
+        onAsked={poll}
+      />
+    );
   else if (route.view === "message")
     main = <OpenThread store={store} msgid={route.msgid} inbox={route.inbox} project={route.project} version={version} onAsked={poll} />;
   else if (route.view === "notifications")
@@ -295,6 +309,19 @@ function Main({ store, onLost }: { store: Store; onLost: (why: string) => void }
           </a>
         </nav>
         <span class="spacer" />
+        <form
+          class="appbar-search"
+          role="search"
+          onSubmit={(e) => {
+            e.preventDefault();
+            const input = (e.target as HTMLFormElement).elements.namedItem("q") as HTMLInputElement;
+            const q = input.value.trim();
+            if (q) location.hash = href({ view: "search", q });
+            input.value = "";
+          }}
+        >
+          <input name="q" type="search" placeholder="Search the archive" aria-label="Search the archive" />
+        </form>
         <a
           class={`sync-badge${sync?.running ? " running" : ""}${sync?.ok === false ? " failed" : ""}`}
           href={href({ view: "following" })}

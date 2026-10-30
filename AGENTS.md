@@ -246,6 +246,17 @@ it by that message (`Plan::messages`; its top becomes the root), then
 shows its series. "Load older" asks for the offset after what was listed;
 new threads shift offsets, so a page may repeat or skip a thread.
 
+**Search is a listing of any query** (2026-10-30): the same Atom request
+with the person's query, in an inbox or `all`, one page at a time, never
+as they type. Listings are keyed by (archive, inbox, query) (schema 10;
+an inbox's page is the query `s:PATCH`). The archive is the judge of its
+query language: patchtrack checks only the length. public-inbox answers
+a query it cannot parse with 400 and an HTML page; that is reported as
+"could not parse" (status is checked before content type, so it is never
+taken for a bot check) and kept in `listing_pages.failed` until a page of
+that query is listed. Old queries' rows are kept (they make Back cheap);
+prune them if size ever matters.
+
 ## Settings
 
 User preferences are settings in the store (`patchtrack_core::settings`):

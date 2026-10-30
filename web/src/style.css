@@ -381,3 +381,19 @@ tr.line-comment td { padding: .5rem 1rem; background: var(--bg); border-top: 1px
   .settings-nav a { white-space: nowrap; }
   .settings-nav a.selected { box-shadow: inset 0 -2px 0 #fd8c73; }
 }
+
+/* Search: a box in the bar, as GitHub's; the archive's results as an inbox's. */
+.appbar-search { flex: 0 1 14rem; min-width: 7rem; }
+.appbar nav a { white-space: nowrap; }
+.appbar-search input { width: 100%; box-sizing: border-box; padding: .3rem .6rem; border: 1px solid #ffffff55; border-radius: 6px;
+  background: #ffffff1a; color: var(--header-fg); }
+.appbar-search input::placeholder { color: var(--header-fg); opacity: .7; }
+.search-form { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-bottom: .25rem; }
+.search-form input, .inbox-search input { padding: .35rem .5rem; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--fg); font: inherit; }
+.search-form .search-query { flex: 1; min-width: 16rem; }
+.search-form .search-inbox { width: 9rem; }
+.archive-search .inbox-head { margin-top: 1rem; }
+.archive-search .inbox-head h1 { overflow-wrap: anywhere; }
+.search-failed .muted { display: block; overflow-wrap: anywhere; }
+@media (max-width: 52rem) { .appbar-search { order: 2; flex-basis: 100%; } }

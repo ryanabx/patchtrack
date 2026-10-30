@@ -26,7 +26,10 @@ pairs it. Then:
   whole, but a followed list's series only as its search returned them.
   The Inboxes page lists any inbox's newest threads as lore's own pages
   do, 50 at a time in one request each, without fetching them; opening
-  one fetches it. Opening a series fetches its thread, when it never was
+  one fetches it. The search box searches the archive the same way, with
+  its own query language (`s:` subject, `f:` from, `dfn:` a file a patch
+  changes, `d:` dates…), in one inbox or in all of them; a search can be
+  followed like any other. Opening a series fetches its thread, when it never was
   or was more than `stale_minutes` (30) ago; Refresh fetches it now. A
   series not fetched yet says so;
 - mail you drop on the Add mail page is imported into that store, and the

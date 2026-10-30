@@ -76,13 +76,13 @@ export class Store {
   }
 
   /** List a page of an inbox's threads: the newest, or (`older`) the next after those listed. */
-  browse(project: string, inbox: string, older = false): Promise<unknown> {
-    return this.post("/v1/browse", { project, inbox, older });
+  browse(project: string, inbox: string, older = false, query = ""): Promise<unknown> {
+    return this.post("/v1/browse", { project, inbox, older, query });
   }
 
-  /** What an inbox listed, newest first. */
-  listing(project: string, inbox: string): Promise<Listing> {
-    return this.get("/v1/listing", { project, inbox });
+  /** What an inbox listed, newest first: its patches, or what a search of it (`query`) found. */
+  listing(project: string, inbox: string, query = ""): Promise<Listing> {
+    return this.get("/v1/listing", { project, inbox, query });
   }
 
   /** Open a listed thread by one of its messages: its series, once the bridge has fetched it. */

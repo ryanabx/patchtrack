@@ -46,6 +46,8 @@ struct Archive {
     mails: Vec<Vec<u8>>,
     broken_search: bool,
     broken_threads: HashSet<String>,
+    /// Answers a search's Atom feed with 400, as public-inbox does a query it cannot parse.
+    bad_query: bool,
 }
 
 impl Archive {
@@ -57,6 +59,9 @@ impl Archive {
         match req.method {
             Method::Post if self.broken_search => unavailable,
             Method::Post => ok(mbox(&self.mails.iter().collect::<Vec<_>>())),
+            Method::Get if req.url.contains("&x=A&") && self.bad_query => {
+                Outcome::Response { status: 400, content_type: "text/html".into(), retry_after: None, body: vec![] }
+            }
             Method::Get if req.url.contains("&x=A&") => ok(ATOM.as_bytes().to_vec()),
             Method::Get if req.url.ends_with("/manifest.js.gz") => {
                 let json = br#"{"/linux-usb/git/0.git": {"modified": 1792000000, "description": "USB"}}"#;
@@ -102,8 +107,11 @@ struct Model {
 struct Run {
     /// The inboxes a read of the manifest found.
     inboxes: Vec<sync::InboxInfo>,
-    /// The threads a page of an inbox listed.
+    /// The threads a page of an inbox listed, and for which query.
     listed: Vec<sync::Listed>,
+    query: Option<String>,
+    /// Why a page was not listed.
+    unlisted: Option<String>,
     fetched: Vec<String>,
     /// Every request's URL, in order.
     urls: Vec<String>,
@@ -143,6 +151,8 @@ impl Model {
             waits: vec![],
             inboxes: vec![],
             listed: vec![],
+            query: None,
+            unlisted: None,
         };
         let mut now = self.now.max(NOW);
         while let Some(effect) = sync.next(now) {
@@ -179,7 +189,11 @@ impl Model {
                 }
                 Effect::TagRoot { .. } => {}
                 Effect::Inboxes { inboxes, .. } => run.inboxes = inboxes,
-                Effect::Listed { entries, .. } => run.listed = entries,
+                Effect::Listed { entries, query, .. } => {
+                    run.listed = entries;
+                    run.query = Some(query);
+                }
+                Effect::Unlisted { why, .. } => run.unlisted = Some(why),
                 Effect::Log(line) => run.logs.push(line),
             }
         }
@@ -323,6 +337,8 @@ fn one_window(outcomes: Vec<Outcome>, retries: u32) -> (Run, Vec<Vec<u8>>) {
             waits: vec![],
             inboxes: vec![],
             listed: vec![],
+            query: None,
+            unlisted: None,
         },
         vec![],
         NOW,
@@ -606,6 +622,24 @@ fn a_page_of_an_inbox_is_one_request_and_no_mail() {
     assert_eq!(run.urls, ["https://lore.example.org/linux-usb/?q=s%3APATCH&x=A&t=1&l=50&o=50"]);
     assert_eq!(run.listed.iter().map(|l| l.msgid.as_str()).collect::<Vec<_>>(), ["o-r@x", "a/b@x"]);
     assert!(store.messages.is_empty() && store.last_sync.is_empty());
+    assert_eq!((run.query.as_deref(), run.unlisted), (Some("s:PATCH"), None));
+}
+
+#[test]
+fn a_search_is_a_listing_of_any_query_and_a_query_the_archive_refuses_says_so() {
+    let mut store = Model::default();
+    let listing = sync::Listing { inbox: "all".into(), query: "f:ann \"other thing\"".into(), offset: 0, limit: 50 };
+    let run = store.sync(&Archive::default(), |p| p.listing = Some(listing.clone()));
+    assert_eq!(run.urls, ["https://lore.example.org/all/?q=f%3Aann+%22other+thing%22&x=A&t=1&l=50&o=0"]);
+    assert_eq!(run.query.as_deref(), Some("f:ann \"other thing\""));
+    assert!(!run.failed && run.unlisted.is_none());
+    // 400 is not a bot check and not retried: the query is the problem, and the person is told so.
+    let bad = Archive { bad_query: true, ..Archive::default() };
+    let run = store.sync(&bad, |p| p.listing = Some(listing.clone()));
+    assert_eq!(run.urls.len(), 1);
+    assert!(run.failed && run.listed.is_empty());
+    let why = run.unlisted.unwrap_or_default();
+    assert!(why.ends_with("o=0: HTTP 400: the archive could not parse the query"), "{why}");
 }
 
 #[test]
