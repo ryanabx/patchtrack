@@ -10,6 +10,10 @@
   mainline tree or the current directory, Next/Trees from linux-next. For
   a tree whose branch neither file names, it lists the branches and asks
   which one (in a terminal), or prints the `tree add` command to finish.
+  Series a maintainer's mail calls applied are included, so their tree
+  can confirm it.
+- An applied series missing from more than two trees says "not in any
+  of the N trees checked" instead of naming them all.
 
 ## 0.1.0
 

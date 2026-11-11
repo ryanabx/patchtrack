@@ -632,8 +632,9 @@ def cmd_tree(args, db):
     then their source of truth (``tree rm`` refuses them).
 
     ``tree discover`` finds the trees for you. Run in a kernel checkout,
-    ``patchtrack tree discover --add`` is all it takes. For each open
-    series it reads the files the patches touch, finds the MAINTAINERS
+    ``patchtrack tree discover --add`` is all it takes. For each series
+    not yet found in a tree (open ones, and those a maintainer's mail
+    calls applied) it reads the files the patches touch, finds the MAINTAINERS
     sections that cover them (as ``get_maintainer.pl`` does) and lists
     their ``T:`` trees. Where a ``T:`` line names no branch, linux-next's
     ``Next/Trees`` supplies the one that feeds linux-next. A tree in
@@ -761,7 +762,8 @@ def _tree_discover(args, db):
     found = _load(args, db)
     heads, to_add, open_ends, elsewhere = {}, {}, {}, []
     for fam in series.families(found, db.closed()):
-        if fam.closed is not None or (not args.all and fam.state in series.DONE):
+        # "applied" stays in: the mail says so, and its tree is how to confirm it
+        if fam.closed is not None or (not args.all and fam.state in series.DONE - {"applied"}):
             continue
         s = fam.head
         if not routed_to & {a.lower() for a in s.to}:
@@ -1150,7 +1152,7 @@ def build_parser():
     sp.add_argument("--no-ls-remote", dest="ls_remote", action="store_false",
                     help="discover: do not list the branches of trees whose branch is unknown")
     sp.add_argument("--add", action="store_true", help="discover: add the trees whose branch is known")
-    sp.add_argument("--all", action="store_true", help="discover: applied and merged series too")
+    sp.add_argument("--all", action="store_true", help="discover: queued, in-next, merged and superseded series too")
     sp.add_argument("-a", "--author", action="append", help="discover: default: every author synced")
     sp.add_argument("-l", "--list", help="discover: only series found by a sync of this inbox")
     sp.set_defaults(func=cmd_tree)

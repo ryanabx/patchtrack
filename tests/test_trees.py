@@ -189,6 +189,15 @@ class Stages(unittest.TestCase):
         self.assertEqual(s.state, "applied")
         self.assertIn("not in foo as of 2026-10-26 00:00", s.evidence)
 
+    def test_many_trees_missing_are_counted_not_listed(self):
+        names = ["a", "b", "c"]
+        s = self.series_with({1: [row(n, "maintainer", None) for n in names]}, applied_mail=True)
+        self.assertEqual(s.state, "applied")
+        self.assertIn("not in any of the 3 trees checked, as of 2026-10-26 00:00", s.evidence)
+        self.assertNotIn("not in a as of", s.evidence)
+        s = self.series_with({1: [row(n, "maintainer", None) for n in names[:2]]}, applied_mail=True)
+        self.assertIn("not in a as of 2026-10-26 00:00, b as of", s.evidence)
+
 
 if __name__ == "__main__":
     unittest.main()
