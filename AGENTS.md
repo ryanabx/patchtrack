@@ -286,6 +286,14 @@ branch made the series `queued`, all four patches by message-id.
   even though its patches reach that tree through a pull. Following
   pulls upward is not in MAINTAINERS.
 - Mainline (`torvalds/linux`) is never proposed as a maintainer tree.
+- **Series the mail calls `applied` are included** (2026-11-11): the
+  first live run skipped every DONE state, so the two series a
+  maintainer had answered "Applied" never got their trees (input, iio),
+  and nothing could confirm the mail.
+- **"not in" names at most two trees.** With 29 trees checked, the note
+  on an applied series listed them all, and `list` cut it after the
+  first ("not in battery …" on an input patch). More than two are
+  counted; `show` still lists each.
 - **Defaults, so a kernel checkout needs no options**: MAINTAINERS from
   `--maintainers`, else the mainline tree, else the current directory's
   repository; Next/Trees from `--next-trees`, else the next tree's copy,

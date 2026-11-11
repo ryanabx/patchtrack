@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0
+
 - **`tree discover`** finds the maintainer trees for your open series:
   the MAINTAINERS sections covering their files (as get_maintainer.pl
   reads them), their `T:` trees, and the branch from linux-next's
@@ -10,6 +12,10 @@
   mainline tree or the current directory, Next/Trees from linux-next. For
   a tree whose branch neither file names, it lists the branches and asks
   which one (in a terminal), or prints the `tree add` command to finish.
+  Series a maintainer's mail calls applied are included, so their tree
+  can confirm it.
+- An applied series missing from more than two trees says "not in any
+  of the N trees checked" instead of naming them all.
 
 ## 0.1.0
 

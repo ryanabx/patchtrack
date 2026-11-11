@@ -311,7 +311,12 @@ def _derive(s):
             s.evidence += "; no \"applied\" mail in the thread"
     elif done == 1:
         s.state = "applied"
-        if misses:
+        if len(misses) > 2:
+            # With trees discovered for every subsystem, naming them all hides
+            # the fact; `show` lists each tree's result.
+            s.evidence += (f"; not in any of the {len(misses)} trees checked, as of "
+                           f'{max(misses.values())[:16].replace("T", " ")}')
+        elif misses:
             # Today's most useful fact: a maintainer said so, the trees do not show it yet.
             s.evidence += "; not in " + ", ".join(
                 f'{t} as of {w[:16].replace("T", " ")}' for t, w in sorted(misses.items()))

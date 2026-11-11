@@ -154,6 +154,7 @@ class Discover(unittest.TestCase):
         self.db_path = os.path.join(self.tmp.name, "t.sqlite3")
         db = store.Store(self.db_path)
         for tag, path, to in (("net", "drivers/net/a.c", "netdev@example.org"),
+                              ("taken", "drivers/net/b.c", "netdev@example.org"),
                               ("vendor", "drivers/net/vendor/x.c", "netdev@example.org"),
                               ("other", "drivers/net/a.c", "other-project@example.org")):
             m = mail(f"{tag}-1@x", f"[PATCH] {tag}: change", ME,
@@ -161,6 +162,9 @@ class Discover(unittest.TestCase):
                           "@@ -1 +1 @@\n-a\n+b\n")
             m["To"] = to
             db.add(m)
+        # a maintainer's "Applied" reply: its tree is how to confirm it
+        db.add(mail("taken-reply@x", "Re: [PATCH] taken: change", "net@example.org", irt="taken-1@x",
+                    body="Applied to net-next, thanks!", date="Tue, 06 Oct 2026 10:00:00 +0000"))
         db.commit()
         db.close()
 
@@ -204,6 +208,7 @@ class Discover(unittest.TestCase):
         self.assertIn("https://github.com/vendor/wireless  (no branch", out)
         self.assertIn("another project's series): 1\n  [PATCH] other: change", out)
         self.assertNotIn("torvalds", out)
+        self.assertIn("[PATCH] taken: change (1 patch)  [applied]", out)
         self.assertIn("branches: main pending queue", out)
         self.assertIn("patchtrack tree add vendor-wireless --repo", out)
 
