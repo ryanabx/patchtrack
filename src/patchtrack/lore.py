@@ -1,7 +1,9 @@
 """Read-only access to a public-inbox archive such as lore.kernel.org.
 
-Only two endpoints are used: the search export (``?x=m``, the same request
-``lei q -I`` makes) and a thread's ``t.mbox.gz``. Requests identify the tool
+Only two archive endpoints are used: the search export (``?x=m``, the
+same request ``lei q -I`` makes) and a thread's ``t.mbox.gz``; besides
+them, ``get_text`` reads one plain file (linux-next's Next/Trees) when
+asked to. Requests identify the tool
 honestly and are spaced out; nothing here ever sends mail.
 """
 
@@ -87,6 +89,12 @@ class Lore:
         """The whole thread containing msgid."""
         mid = urllib.parse.quote(msgid.strip("<>"), safe="@+-._~=")
         return parse_mbox(self._get(f"{self.base}/all/{mid}/t.mbox.gz"))
+
+
+def get_text(url, opener=urllib.request.urlopen):
+    """A plain-text file over HTTP(S), such as linux-next's Next/Trees, with
+    the same honest User-Agent and retries as the archive requests."""
+    return Lore(opener=opener, delay=0)._get(url).decode("utf-8", "replace")
 
 
 def windowed(search, query, since, until, days=30, split_at=SPLIT_AT, progress=None):

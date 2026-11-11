@@ -28,6 +28,23 @@ def http_error(code, retry_after=None):
     return urllib.error.HTTPError("u", code, "x", headers, io.BytesIO())
 
 
+class GetText(unittest.TestCase):
+    def test_plain_file(self):
+        seen = []
+
+        def opener(req, timeout):
+            seen.append(req.get_header("User-agent"))
+            return Response(b"net\thttps://example.org/net.git#main\n", "text/plain; charset=UTF-8")
+        self.assertEqual(lore.get_text("https://example.org/Trees", opener=opener),
+                         "net\thttps://example.org/net.git#main\n")
+        self.assertEqual(seen, [lore.USER_AGENT])
+
+    def test_bot_check_page_is_an_error(self):
+        with self.assertRaises(lore.LoreError):
+            lore.get_text("https://example.org/Trees",
+                          opener=lambda req, timeout: Response(b"<html>", "text/html"))
+
+
 class Retries(unittest.TestCase):
     def client(self, outcomes):
         self.sleeps = []
