@@ -62,6 +62,21 @@ def fetch(tree):
     git(tree.repo, "fetch", "--quiet", "--no-tags", tree.url, f"+{tree.branch}:{tree.ref}")
 
 
+def remote_heads(url, timeout=120):
+    """The branch names at url (`git ls-remote --heads`), or None if it
+    cannot be read. GitHub's dependency-bot branches are left out: they
+    are never anyone's queue."""
+    try:
+        p = subprocess.run(["git", "ls-remote", "--heads", url], capture_output=True, text=True,
+                           timeout=timeout, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        return None
+    if p.returncode:
+        return None
+    heads = (line.split("refs/heads/", 1)[1] for line in p.stdout.splitlines() if "refs/heads/" in line)
+    return sorted(h for h in heads if not h.startswith("dependabot/"))
+
+
 def is_shallow(repo):
     return git(repo, "rev-parse", "--is-shallow-repository").strip() == "true"
 

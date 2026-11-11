@@ -10,7 +10,7 @@ language, same archive, same conventions where we can match them.
 
 | path | what |
 |---|---|
-| `src/patchtrack/lore.py` | the only network code: public-inbox search export (`?x=m`) and thread `t.mbox.gz` |
+| `src/patchtrack/lore.py` | the only network code: public-inbox search export (`?x=m`) and thread `t.mbox.gz`; `get_text` for one plain file (Next/Trees) |
 | `src/patchtrack/parse.py` | mail to facts: subject prefixes, trailers, "applied" evidence, b4 change-ids |
 | `src/patchtrack/thread.py` | `read`: reply order, depth, quote collapsing, patch and cover parts |
 | `src/patchtrack/tui.py` | the curses browser: `Model` (keys, views; no curses) and a thin `draw`/`run` |
@@ -20,6 +20,7 @@ language, same archive, same conventions where we can match them.
 | `src/patchtrack/news.py` | what changed since you last looked: snapshots and their differences |
 | `src/patchtrack/local.py` | your own mail: Maildir, `.eml` directories, mbox; header-first filtering |
 | `src/patchtrack/trees.py` | git: fetch a tree, find posted patches in it (message-id trailer, patch-id, subject) |
+| `src/patchtrack/maintainers.py` | `tree discover`: MAINTAINERS sections (`F:`/`X:`/`N:` as get_maintainer.pl), `T:` trees, branches from linux-next's `Next/Trees` |
 | `src/patchtrack/store.py` | SQLite of raw facts: messages, fetch times, trees and per-patch tree results |
 | `src/patchtrack/series.py` | messages to series, families and states |
 | `src/patchtrack/cli.py` | `patchtrack sync`, `list`, `show`, `people`, `board`, `tree`, `check` |
@@ -28,6 +29,7 @@ language, same archive, same conventions where we can match them.
 | `docs/` | the Sphinx site: `conf.py` (generates the command pages), hand-written pages, `requirements.txt` |
 | `src/patchtrack/config.py` | the TOML config file; bot rules |
 | `tests/test_patchtrack.py` | unittest, synthetic mail only, no network |
+| `tests/test_maintainers.py` | section matching, routes and branches, `tree discover` and `--add` against a throwaway repo |
 | `tests/test_trees.py` | matchers against a throwaway git repo; stage derivation |
 | `tests/test_sync.py` | what `sync` refetches and how it fails, against an in-memory fake archive |
 | `tests/test_thread.py` | quote collapsing, sign-offs, patch and cover parts, reply order |
@@ -260,6 +262,37 @@ to follow" on a cover used to mark the whole series applied; such
 announcements are now partial (1 of 319 surveyed announcements matches,
 the one it was written for).
 
+## Tree discovery (2026-11-11)
+
+Why: a maintainer applied a four-patch series without a reply, and with
+no trees configured nothing showed it. The project's own files say where
+patches go, so `tree discover` reads them rather than guessing:
+MAINTAINERS `T:` lines, and linux-next's `Next/Trees` for the branch a
+`T:` line omits. Run against one contributor's 18 open series, it
+named a tree with a branch for 15; 1 had no section with a `T:` (hwrng's
+section has none; that is MAINTAINERS' answer), 1 was a U-Boot series,
+and 1 (mt76, `T: git https://github.com/nbd168/wireless`) has no branch
+anywhere. That tree has `mt76`, `mt76-pending` and `pending`, and
+"pending" means *not yet applied*, so the branch is never guessed:
+`--add` lists the branches and asks in a terminal (Enter skips), and
+prints a `tree add` command otherwise. Adding Felix's `mt76`
+branch made the series `queued`, all four patches by message-id.
+
+- **Projects are told apart by lists, not people.** Matching on any
+  M:/R:/L: address put a U-Boot series through the kernel's file: one of
+  its reviewers also maintains something in the kernel.
+- **`X:` follows get_maintainer.pl**, so an excluded vendor directory
+  (wireless excludes `mediatek/`) does not route to the parent tree,
+  even though its patches reach that tree through a pull. Following
+  pulls upward is not in MAINTAINERS.
+- Mainline (`torvalds/linux`) is never proposed as a maintainer tree.
+- **Defaults, so a kernel checkout needs no options**: MAINTAINERS from
+  `--maintainers`, else the mainline tree, else the current directory's
+  repository; Next/Trees from `--next-trees`, else the next tree's copy,
+  else linux-next's own (one request, and only when the MAINTAINERS is
+  the kernel's: it names `torvalds/linux`). `trees.remote_heads` is the
+  `ls-remote`; tests mock it and `lore.get_text`, so they stay offline.
+
 ## Known gaps and next steps
 
 Done: sync that cannot silently miss mail, your own mailbox as a source,
@@ -283,12 +316,15 @@ TUI. What is left, roughly in order of value:
 4. **Other archives**: git's "What's cooking" is not parsed (use its
    branches as trees). Mailman and PostgreSQL archives are not
    public-inbox. DPDK's search is behind a bot check.
-5. **Board**: per list works (`-l`); `--all-versions` does not exist yet.
+5. **Patchwork** (`Q:` in MAINTAINERS) keeps an "Accepted" state for
+   some lists (linux-wireless, netdev); its REST API could be a third
+   applied signal, beside the mail and the trees. Not read yet.
+6. **Board**: per list works (`-l`); `--all-versions` does not exist yet.
    The docs have a systemd timer for `sync && check --fetch; board`
    (`docs/scheduling.rst`).
-6. **Old rows** stored before a migration lack its columns until they are
+7. **Old rows** stored before a migration lack its columns until they are
    fetched again (`sync --full`, `check`).
-7. **Releasing**: `.github/workflows/release.yml` publishes to PyPI when
+8. **Releasing**: `.github/workflows/release.yml` publishes to PyPI when
    a GitHub release is published, through Trusted Publishing (no token).
    It refuses a tag that does not match `__version__`, runs the tests,
    and checks the build with `twine check --strict`. Publishing a release

@@ -33,6 +33,25 @@ check, in ``~/.config/patchtrack/config.toml``:
 
 :doc:`configuration` lists every key.
 
+Which maintainer trees to check
+-------------------------------
+
+A maintainer often applies a patch without replying. The tree check sees
+it anyway, but only in a tree you named. For the kernel, let
+``tree discover`` name them, from MAINTAINERS and linux-next's
+``Next/Trees``. In your kernel checkout:
+
+.. code-block:: sh
+
+   patchtrack tree discover          # what it would add, series by series
+   patchtrack tree discover --add    # add them
+   patchtrack check --fetch          # fetch them and look for your patches
+
+Some trees name no branch anywhere, and only the maintainer knows which
+one means "applied". ``--add`` lists their branches and asks; outside a
+terminal it prints the :doc:`commands/tree` ``add`` command to finish by
+hand.
+
 The daily round
 ---------------
 

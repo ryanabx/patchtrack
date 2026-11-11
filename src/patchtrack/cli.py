@@ -15,7 +15,7 @@ import subprocess
 import urllib.parse
 import webbrowser
 
-from . import __version__, b4local, board, config, local, lore, news, nudge, parse, pretty, series, store, thread, trees, vdiff
+from . import __version__, b4local, board, config, local, lore, maintainers, news, nudge, parse, pretty, series, store, thread, trees, vdiff
 
 
 def cmd_sync(args, db):
@@ -630,7 +630,28 @@ def cmd_tree(args, db):
 
     Trees can also be declared as ``[[trees]]`` in the config, which is
     then their source of truth (``tree rm`` refuses them).
+
+    ``tree discover`` finds the trees for you. Run in a kernel checkout,
+    ``patchtrack tree discover --add`` is all it takes. For each open
+    series it reads the files the patches touch, finds the MAINTAINERS
+    sections that cover them (as ``get_maintainer.pl`` does) and lists
+    their ``T:`` trees. Where a ``T:`` line names no branch, linux-next's
+    ``Next/Trees`` supplies the one that feeds linux-next. A tree in
+    neither has no known branch, because which branch means "applied" is
+    the maintainer's choice: its branches are listed, and ``--add`` asks
+    which one when it runs in a terminal. ``--add`` adds the trees as
+    ``maintainer`` trees fetched into ``--repo`` (default: the repository
+    MAINTAINERS came from); then ``check --fetch`` looks in them.
+
+    MAINTAINERS is read from ``--maintainers REPO[:REF]``, else the
+    ``mainline`` tree, else the repository in the current directory.
+    Next/Trees is read from ``--next-trees`` (a file or a URL; ``none``
+    for none), else the ``next`` tree's copy, else, for the kernel's
+    MAINTAINERS, linux-next's own on git.kernel.org (one request).
+    Mainline itself is left out: add it with ``--role mainline``.
     """
+    if args.action == "discover":
+        return _tree_discover(args, db)
     if args.action == "list":
         for t in db.trees():
             src = f"{t.url} {t.branch}" if t.url else "local"
@@ -648,6 +669,181 @@ def cmd_tree(args, db):
     ref = args.ref or f"refs/patchtrack/{args.name}"
     db.add_tree(trees.Tree(args.name, repo, ref, args.url, args.branch, args.role))
     db.commit()
+    return 0
+
+
+def _git_file(repo, ref, path):
+    return trees.git(repo, "show", f"{ref}:{path}")
+
+
+def _maintainers_source(args, known):
+    """(repo, ref) to read MAINTAINERS from: --maintainers, else the mainline
+    tree, else the repository in the current directory."""
+    if args.maintainers:
+        repo, _, ref = args.maintainers.partition(":")
+        return os.path.abspath(os.path.expanduser(repo)), ref or "HEAD"
+    main = next((t for t in known if t.role == "mainline"), None)
+    if main:
+        return main.repo, main.ref
+    try:
+        top = trees.git(os.getcwd(), "rev-parse", "--show-toplevel").strip()
+    except trees.GitError:
+        sys.exit("no MAINTAINERS: run this in a kernel checkout, pass --maintainers REPO[:REF], "
+                 "or add a mainline tree")
+    return top, "HEAD"
+
+
+def _next_trees(args, known, kernel):
+    """(text, where from) of linux-next's Next/Trees: --next-trees (a file, a
+    URL or "none"), else the next tree's copy, else linux-next's own, for the
+    kernel's MAINTAINERS only."""
+    src = args.next_trees
+    if src == "none":
+        return "", None
+    if src and not re.match(r"^https?://", src):
+        with open(os.path.expanduser(src), encoding="utf-8", errors="replace") as f:
+            return f.read(), src
+    if not src:
+        nt = next((t for t in known if t.role == "next"), None)
+        if nt:
+            try:
+                return _git_file(nt.repo, nt.ref, "Next/Trees"), f"{nt.name}:Next/Trees"
+            except trees.GitError:
+                pass
+        if not kernel:
+            return "", None
+        src = maintainers.NEXT_TREES_URL
+    try:
+        return lore.get_text(src), src
+    except lore.LoreError as e:
+        print(f"Next/Trees: {e}", file=sys.stderr)
+        return "", None
+
+
+def _choose_branch(name, url, heads):
+    """Ask which branch of a tree means "applied"; None to skip it."""
+    print(f"\n{name} ({url}) names no branch. Which one does the maintainer apply to?")
+    for i, h in enumerate(heads, 1):
+        print(f"  {i}) {h}")
+    while True:
+        try:
+            ans = input("number or name, Enter to skip: ").strip()
+        except EOFError:
+            return None
+        if not ans:
+            return None
+        if ans.isdigit() and 1 <= int(ans) <= len(heads):
+            return heads[int(ans) - 1]
+        if ans in heads:
+            return ans
+        print("  not one of the branches above")
+
+
+def _tree_discover(args, db):
+    known = db.trees()
+    repo, ref = _maintainers_source(args, known)
+    try:
+        text = _git_file(repo, ref, "MAINTAINERS")
+    except trees.GitError as e:
+        sys.exit(f"MAINTAINERS: {e}")
+    sections, routed_to = maintainers.parse(text), maintainers.addresses(text)
+    next_text, next_from = _next_trees(args, known, maintainers.is_kernel(text))
+    next_trees = maintainers.parse_next_trees(next_text)
+    if next_from and not next_trees:
+        print(f"Next/Trees: nothing read from {next_from}", file=sys.stderr)
+    print(f"MAINTAINERS from {repo} {ref}; Next/Trees from {next_from or 'nowhere'}\n", file=sys.stderr)
+
+    by_key = {(maintainers.normalize_url(t.url), t.branch): t for t in known if t.url}
+    checked_urls = {}
+    for (u, _), t in by_key.items():
+        checked_urls.setdefault(u, []).append(t.name)
+    msgs = {m["msgid"]: m for m in db.messages()}
+    found = _load(args, db)
+    heads, to_add, open_ends, elsewhere = {}, {}, {}, []
+    for fam in series.families(found, db.closed()):
+        if fam.closed is not None or (not args.all and fam.state in series.DONE):
+            continue
+        s = fam.head
+        if not routed_to & {a.lower() for a in s.to}:
+            elsewhere.append(s)
+            continue
+        paths = sorted({f for i, mid in s.patches.items() if i and mid in msgs
+                        for pair in trees.DIFF_RE.findall(msgs[mid]["body"]) for f in pair
+                        if f != "/dev/null"})
+        print(f"{s.label()}  [{fam.state}]")
+        rs = maintainers.routes(sections, paths, next_trees)
+        if not rs:
+            print("  no tree: no MAINTAINERS section covering its files names one\n")
+            continue
+        last = None
+        for r in rs:
+            if r.section != last:
+                print(f"  {r.section}")
+                last = r.section
+            have = by_key.get(r.key)
+            if r.branch:
+                tag = f"checked as {have.name}" if have else f"new: {maintainers.tree_name(r)}"
+                print(f"    {r.url} {r.branch}  (from {r.source}; {tag})")
+                if not have:
+                    to_add.setdefault(r.key, r)
+                continue
+            nurl = maintainers.normalize_url(r.url)
+            mine = checked_urls.get(nurl)
+            print(f"    {r.url}  (no branch: its T: line names none, and it is not in Next/Trees"
+                  + (f"; checked as {', '.join(mine)})" if mine else ")"))
+            if mine:
+                continue
+            if args.ls_remote and r.url not in heads:
+                heads[r.url] = trees.remote_heads(r.url)
+            if heads.get(r.url) is not None:
+                print(f"      branches: {' '.join(heads[r.url])}")
+            open_ends.setdefault(nurl, r)
+        print()
+    if elsewhere:
+        print(f"Not sent to any list in this MAINTAINERS (another project's series): {len(elsewhere)}")
+        for s in elsewhere:
+            print(f"  {s.label()}")
+        print()
+
+    into = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else repo
+    if not args.add:
+        if to_add:
+            print("Trees with a known branch that are not checked yet (`tree discover --add` adds them):")
+            for r in to_add.values():
+                print(f"  {maintainers.tree_name(r)}  {r.url} {r.branch}")
+        if open_ends:
+            print("Trees whose branch only the maintainer knows (`--add` asks; or add one by hand):")
+            for r in open_ends.values():
+                print(f"  patchtrack tree add {maintainers.tree_name(r)} --repo {shlex.quote(into)} "
+                      f"--url {r.url} --branch BRANCH")
+        return 0
+
+    if open_ends and sys.stdin.isatty():
+        for nurl, r in open_ends.items():
+            hs = heads.get(r.url)
+            if not hs:
+                continue
+            b = _choose_branch(maintainers.tree_name(r), r.url, hs)
+            if b:
+                picked = maintainers.Route(r.section, r.url, b, "you")
+                to_add.setdefault(picked.key, picked)
+        print()
+    elif open_ends:
+        print("Not added, their branch is the maintainer's choice (run in a terminal to be asked):")
+        for r in open_ends.values():
+            print(f"  patchtrack tree add {maintainers.tree_name(r)} --repo {shlex.quote(into)} "
+                  f"--url {r.url} --branch BRANCH")
+    names = {t.name for t in known}
+    for r in to_add.values():
+        name = maintainers.tree_name(r)
+        while name in names:
+            name += "_"
+        names.add(name)
+        db.add_tree(trees.Tree(name, into, f"refs/patchtrack/{name}", r.url, r.branch, "maintainer"))
+        print(f"added {name}: {r.url} {r.branch} into {into}")
+    db.commit()
+    if to_add:
+        print("\nNext: `patchtrack check --fetch` fetches them and looks for your patches.")
     return 0
 
 
@@ -937,7 +1133,7 @@ def build_parser():
     sp.set_defaults(func=cmd_config)
 
     sp = command("tree", cmd_tree, "the git trees `check` looks in")
-    sp.add_argument("action", choices=("add", "list", "rm"))
+    sp.add_argument("action", choices=("add", "list", "rm", "discover"))
     sp.add_argument("name", nargs="?")
     sp.add_argument("--repo", help="local repository (fetches go into it)")
     sp.add_argument("--ref", help="a ref already in the repository")
@@ -945,6 +1141,18 @@ def build_parser():
     sp.add_argument("--branch", help="the branch to fetch from --url")
     sp.add_argument("--role", choices=trees.ROLES, default="maintainer",
                     help="maintainer: queued; next: in-next; mainline: merged")
+    sp.add_argument("--maintainers", metavar="REPO[:REF]",
+                    help="discover: read MAINTAINERS here (default: the mainline tree, else the "
+                    "current directory's repository)")
+    sp.add_argument("--next-trees", metavar="FILE|URL|none",
+                    help="discover: linux-next's Next/Trees (default: the next tree's copy, else "
+                    "linux-next's own on git.kernel.org)")
+    sp.add_argument("--no-ls-remote", dest="ls_remote", action="store_false",
+                    help="discover: do not list the branches of trees whose branch is unknown")
+    sp.add_argument("--add", action="store_true", help="discover: add the trees whose branch is known")
+    sp.add_argument("--all", action="store_true", help="discover: applied and merged series too")
+    sp.add_argument("-a", "--author", action="append", help="discover: default: every author synced")
+    sp.add_argument("-l", "--list", help="discover: only series found by a sync of this inbox")
     sp.set_defaults(func=cmd_tree)
 
     sp = command("check", cmd_check, "look for every posted patch in the trees")
@@ -995,7 +1203,7 @@ def build_parser():
 def main(argv=None):
     p = build_parser()
     args = p.parse_args(argv)
-    if args.cmd == "tree" and args.action != "list" and not args.name:
+    if args.cmd == "tree" and args.action in ("add", "rm") and not args.name:
         p.error("tree add/rm need a NAME")
     if args.cmd == "tree" and args.action == "add" and not args.repo:
         p.error("tree add needs --repo")

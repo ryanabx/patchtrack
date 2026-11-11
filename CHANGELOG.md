@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- **`tree discover`** finds the maintainer trees for your open series:
+  the MAINTAINERS sections covering their files (as get_maintainer.pl
+  reads them), their `T:` trees, and the branch from linux-next's
+  `Next/Trees` where `T:` names none. In a kernel checkout,
+  `tree discover --add` needs no options: MAINTAINERS comes from the
+  mainline tree or the current directory, Next/Trees from linux-next. For
+  a tree whose branch neither file names, it lists the branches and asks
+  which one (in a terminal), or prints the `tree add` command to finish.
+
 ## 0.1.0
 
 The first version.
