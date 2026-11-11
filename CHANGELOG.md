@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0
+
 - **`tree discover`** finds the maintainer trees for your open series:
   the MAINTAINERS sections covering their files (as get_maintainer.pl
   reads them), their `T:` trees, and the branch from linux-next's
