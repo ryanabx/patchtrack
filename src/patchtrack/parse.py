@@ -22,10 +22,26 @@ B4_MSGID_RE = re.compile(r"^\d{8}-(.+?)-v\d+-\d+-[0-9a-f]{12}@")
 B4_CHANGE_ID_RE = re.compile(r"^\d{8}-(.+?)(?:-[0-9a-f]{12})?$")
 # b4 ty: "[1/2] subject\n      commit: <sha>"
 B4_TY_RE = re.compile(r"^\s*\[(\d+)/(\d+)\]\s.*\n\s+commit:\s*([0-9a-f]{7,40})", re.M)
+# "Thanks, ", "Thank you! ", "Thx. " before the announcement
+_THANKS = r"(?:(?:thanks|thank you|thx)[,.!]?\s+)?"
+# Shorthand with the verb last: "Patch applied.", "Patches 1-3 applied to
+# for-next", "Both applied.", "Series queued, thanks."; it must end there or
+# name where, so that a tester's "Patch applied cleanly on v6.1" is not one.
+_SHORTHAND = (
+    r"(?:(?:both|all|the whole|whole|entire)\s+)?"
+    r"(?:(?:patch(?:es)?|series|changes?|commits?)\s+)?"
+    r"(?:\d+(?:/\d+)?(?:\s*(?:-|,|and|to)\s*\d+(?:/\d+)?)*\s+)?"
+    r"(?:now\s+|both\s+|all\s+)?(?:applied|queued|picked up|merged|pushed)"
+    r"(?:[.!,:;]|\s+(?:to|into|for|in)\b|\s*$)"
+)
 APPLIED_LINE_RE = re.compile(
     r"^\s*(?:"
-    r"(?:thanks,?\s+)?(?:applied|queued|picked up)\b"
-    r"|(?:i'?ve|i have|i)\s+(?:now\s+)?(?:applied|queued|picked up)\b.*\b(?:to|into|thanks)\b"
+    + _THANKS + r"(?:applied|queued|picked up)\b"
+    # drm and others: "Pushed to drm-misc-next.", "Merged, thanks."
+    r"|" + _THANKS + r"(?:merged|pushed|committed)(?:[.!,]|\s+(?:to|into)\b)"
+    # crypto: "Patch applied.  Thanks."
+    r"|" + _THANKS + _SHORTHAND
+    + r"|(?:i'?ve|i have|i)\s+(?:now\s+)?(?:applied|queued|picked up)\b.*\b(?:to|into|thanks)\b"
     r"|this (?:patch|series) was applied to"
     # QEMU: "This was merged into master (<sha>)."
     r"|(?:this|the) (?:patch |series |change )?(?:was|has been|is now|got) (?:merged|applied|pushed|committed)"
@@ -33,6 +49,8 @@ APPLIED_LINE_RE = re.compile(
     r")",
     re.I,
 )
+# Patch numbers named in the announcement: "Patches 1-3 applied", "Applied patch 2 and 4/5"
+NUMBERED_RE = re.compile(r"\bpatch(?:es)?\s+(\d+(?:/\d+)?(?:\s*(?:-|,|and|&|to)\s*\d+(?:/\d+)?)*)", re.I)
 
 
 @dataclass
@@ -196,7 +214,9 @@ def trailers(body):
 
 
 # A line that is nothing but an announcement: "Applied.", "Queued, thanks."
-BARE_APPLIED_RE = re.compile(r"^\s*(?:thanks,?\s+)?(?:applied|queued)[.!]?(?:,?\s*thanks[.!]?)?\s*$", re.I)
+BARE_APPLIED_RE = re.compile(
+    r"^\s*(?:thanks,?\s+)?(?:(?:patch(?:es)?|series|both|all)\s+)?(?:applied|queued)[.!]?(?:,?\s*thanks[.!]?)?\s*$",
+    re.I)
 
 
 def _paragraph_starts(body):
@@ -230,12 +250,25 @@ def applied(body, subject=""):
     if line is None:
         return None
     indices = sorted({int(i) for i, _, _ in B4_TY_RE.findall(text)})
+    indices = indices or numbered(line)
     return Applied(line=line, indices=indices, subset=parse_subject(subject).subset or partial(line))
 
 
 # "Committed to trunk as r17-1234, others to follow": only part of a series.
 PARTIAL_RE = re.compile(r"\b(?:others?|the rest|rest|remaining(?: ones| patches)?)\b[^.;]*?\b(?:follow|later|to come)\b",
                         re.I)
+
+
+def numbered(line):
+    """The patch numbers an announcement names: "Patches 1-3 and 5 applied" -> [1, 2, 3, 5]."""
+    m = NUMBERED_RE.search(line or "")
+    if not m:
+        return []
+    got = set()
+    for part in re.split(r"\s*(?:,|and|&)\s*", m.group(1)):
+        ends = [int(n.split("/")[0]) for n in re.split(r"\s*(?:-|to)\s*", part) if n]
+        got |= set(range(ends[0], ends[-1] + 1)) if len(ends) == 2 else set(ends)
+    return sorted(got)
 
 
 def partial(line):

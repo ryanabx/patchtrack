@@ -82,6 +82,20 @@ class Evidence(unittest.TestCase):
     def test_after_a_quote(self):
         self.assertIsNotNone(parse.applied("> [PATCH] foo\nApplied to master, thanks!\n"))
 
+    def test_shorthand(self):
+        # crypto, drm, and the other verb-last forms
+        for body in ("> [PATCH] hwrng: mtk - foo\n\nPatch applied.  Thanks.\n",
+                     "Fairly simple.\nPatch applied.  Thanks.\n",
+                     "Both applied, thanks.\n", "All applied.\n", "Series applied to cryptodev.\n",
+                     "Thanks! Applied to soc/dt.\n", "Thank you, applied.\n",
+                     "Pushed to drm-misc-next, thanks!\n", "Thanks, merged.\n", "Now applied to mmc-next.\n"):
+            self.assertIsNotNone(parse.applied(body), body)
+
+    def test_numbered(self):
+        self.assertEqual(parse.applied("Patches 1-3 applied to for-next, thanks.\n").indices, [1, 2, 3])
+        self.assertEqual(parse.applied("Applied patches 1 and 3, thanks.\n").indices, [1, 3])
+        self.assertEqual(parse.applied("Patch 2/4 queued for 6.20.\n").indices, [2])
+
     def test_not_applied(self):
         # The last three are wrapped sentences seen on gcc-patches, git@ and xen-devel.
         for body in ("> Applied, thanks!\nWhy?\n",
@@ -89,7 +103,12 @@ class Evidence(unittest.TestCase):
                      "Thanks.\n-- \nApplied Signal Corp\n",
                      'The attribute is now\napplied to struct after its definition".\n',
                      "This one depends on the other being\napplied first.\n",
-                     "Those tests will be\npicked up and run automatically in Gitlab CI.\n"):
+                     "Those tests will be\npicked up and run automatically in Gitlab CI.\n",
+                     # a tester's report, not an announcement
+                     "Patch applied cleanly on top of v6.1 and tested.\n",
+                     "The patch applied fine but the build fails.\n",
+                     "Merged with the other one?\n", "Pushed back on this approach before.\n",
+                     "All of this applied to the old driver too.\n"):
             self.assertIsNone(parse.applied(body), body)
 
     def test_change_id(self):
