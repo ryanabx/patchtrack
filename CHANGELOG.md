@@ -14,6 +14,11 @@
   which one (in a terminal), or prints the `tree add` command to finish.
   Series a maintainer's mail calls applied are included, so their tree
   can confirm it.
+- More ways of saying "applied" count as one: the verb-last shorthand
+  ("Patch applied.  Thanks.", as crypto's maintainer writes it; "Both
+  applied", "Series queued for 6.20"), "Thanks! Applied", "Thank you,
+  applied", and "Pushed to drm-misc-next" or "Merged, thanks". Numbers
+  in the line ("Patches 1-3 applied") say which patches.
 - An applied series missing from more than two trees says "not in any
   of the N trees checked" instead of naming them all.
 
